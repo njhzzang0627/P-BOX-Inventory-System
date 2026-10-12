@@ -2267,6 +2267,12 @@
     document.getElementById('app-main').style.display = '';
 
     const isAdmin = hasFullAccess();
+    const stBadge = document.querySelector('#app-header .status-badge');
+    if (stBadge && !stBadge.dataset.keyBound){
+      stBadge.dataset.keyBound = '1';
+      stBadge.addEventListener('click', ()=>{ if (hasFullAccess()) promptGeminiKey(); });
+    }
+    if (stBadge) stBadge.title = hasFullAccess() ? '클릭하면 OCR(Gemini) API 키를 바꿀 수 있습니다' : '';
     const dsSub = document.getElementById('ds-app-sub');
     if (dsSub) dsSub.textContent = '대상(주) 물류 · ' + (currentUser ? currentUser.center : '-') + (currentRole() ? ' · ' + currentRole() : '');
     const roleLabelEl = document.getElementById('dp-role-center-label');
@@ -3040,12 +3046,52 @@
 
   // ⚠️ 아래 키는 이 파일 안에 그대로 저장되어 있습니다. 이 파일을 깃허브/넷리파이 등 공개된 곳에 올리지 마세요.
   // (Cloudflare Worker로 키를 숨기는 방식은 나중에 필요하면 다시 적용할 수 있습니다.)
-  const HARDCODED_API_KEY = "AQ.Ab8RN6LY8NNLu99HBTh_ChBLiqZMM4RzqYQFgPTpKoOq_y4adg";
+  const HARDCODED_API_KEY = "AQ.Ab8RN6KmMvDQHq92ffldW4b4OVytTwY8j7mgnjMaZiWNyYrOdg";
 
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
+  // ---- Gemini API 키: 화면에서 새로 입력한 키(이 기기에 저장)가 있으면 그것을 우선 사용합니다 ----
+  //  · 키가 만료/정지(예: "The bound service account is deleted or disabled")되면 코드를 고치지 않고
+  //    판독 오류 화면의 [🔑 새 API 키 입력] 버튼 또는 상단 CLOUD ONLINE 배지(관리자)로 새 키를 넣을 수 있습니다.
+  const GEMINI_KEY_OVERRIDE = 'pbox_gemini_api_key_override';
+  function getGeminiKey(){
+    let k = '';
+    try { k = (localStorage.getItem(GEMINI_KEY_OVERRIDE) || '').trim(); } catch(e){}
+    return k || HARDCODED_API_KEY || '';
+  }
+  function promptGeminiKey(){
+    const cur = getGeminiKey();
+    const v = prompt('새 Gemini API 키를 입력하세요.\n(Google AI Studio › Get API key 에서 발급 · 이 기기에만 저장됩니다)\n\n현재 키: ' + (cur ? cur.slice(0,6) + '…' + cur.slice(-4) : '없음') + '\n비워두고 확인하면 파일에 들어 있는 기본 키로 되돌립니다.', '');
+    if (v === null) return false;
+    try {
+      if (v.trim()) localStorage.setItem(GEMINI_KEY_OVERRIDE, v.trim());
+      else localStorage.removeItem(GEMINI_KEY_OVERRIDE);
+    } catch(e){ alert('이 브라우저에 키를 저장하지 못했습니다.'); return false; }
+    alert(v.trim() ? '새 API 키를 저장했습니다. 다시 판독해 주세요.' : '기본 키로 되돌렸습니다.');
+    return true;
+  }
+  window.setGeminiKey = promptGeminiKey;
+  function isGeminiKeyError(status, msg){
+    return status === 401 || status === 403 ||
+      /api key not valid|api_key_invalid|api key expired|service account|permission[_ ]denied|unregistered callers|api key.*(disabled|deleted|revoked)|requests from referer/i.test(msg || '');
+  }
+  function showOcrError(err){
+    const box = document.getElementById('error-box');
+    box.style.display = '';
+    const msg = (err && err.message) ? err.message : String(err);
+    if (err && err.isKeyError){
+      box.innerHTML = '<b>Gemini API 키를 사용할 수 없습니다.</b><br>' + escapeHtml(msg) +
+        '<br><span style="opacity:.85;">키가 만료·정지되었거나 연결된 서비스 계정이 삭제된 상태입니다. Google AI Studio에서 새 키를 발급받아 입력해 주세요.</span>' +
+        '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-key-fix-btn">🔑 새 API 키 입력</button></div>';
+      const b = document.getElementById('ocr-key-fix-btn');
+      if (b) b.onclick = ()=>{ if (promptGeminiKey()) box.style.display = 'none'; };
+    } else {
+      box.textContent = '판독 중 오류가 발생했습니다: ' + msg;
+    }
+  }
+
   async function callClaude(images, promptText){
-    const apiKey = HARDCODED_API_KEY || localStorage.getItem(API_KEY_STORAGE);
+    const apiKey = getGeminiKey();
     if (!apiKey){
       throw new Error('API 키가 설정되어 있지 않습니다. 코드 상단의 HARDCODED_API_KEY를 확인해주세요.');
     }
@@ -3091,11 +3137,12 @@
           const isTransient = response.status === 503 || response.status === 429 ||
             /overload|high demand|다시 시도/i.test(msg);
           // API 키 자체가 잘못된 경우는 모델을 바꿔도 소용없으므로 바로 중단합니다.
-          const isFatal = response.status === 400 && /api key not valid|api_key_invalid/i.test(msg);
+          const isFatal = isGeminiKeyError(response.status, msg) || (response.status === 400 && /api key not valid|api_key_invalid/i.test(msg));
 
           lastErr = new Error(msg);
 
           if (isFatal){
+            lastErr.isKeyError = true;
             throw lastErr;
           }
 
@@ -3467,8 +3514,7 @@ ${rowResultSchema()}`;
       }
       renderResults();
     } catch(err){
-      document.getElementById('error-box').style.display = '';
-      document.getElementById('error-box').textContent = '판독 중 오류가 발생했습니다: ' + err.message;
+      showOcrError(err);
     } finally {
       document.getElementById('loading-box').style.display = 'none';
     }
@@ -3513,8 +3559,7 @@ ${rowResultSchema()}`;
       }
       renderResults();
     } catch(err){
-      document.getElementById('error-box').style.display = '';
-      document.getElementById('error-box').textContent = '판독 중 오류가 발생했습니다: ' + err.message;
+      showOcrError(err);
     } finally {
       document.getElementById('loading-box').style.display = 'none';
     }
