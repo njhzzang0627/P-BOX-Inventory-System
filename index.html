@@ -2586,9 +2586,19 @@
     }
   }
 
+  function wholeImageCanvas(img){
+    const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+    cv.getContext('2d').drawImage(img, 0, 0);
+    return upscaleIfSmall(cv, 1400);
+  }
+
   function autoCropPage(img){
+    // 1순위: 표 인쇄선 기준 보정 / 2순위: 종이 모서리(정상 사각형일 때만) / 3순위: 원본 그대로
+    const rect = rectifyByTableLines(img);
+    if (rect) return rect;
     const paperCorners = autoDetectPaperCorners(img);
     const c = trimCornersToContent(img, paperCorners);
+    if (!quadLooksValid(c, img)) return wholeImageCanvas(img);
     const widthTop = Math.hypot(c[1].x-c[0].x, c[1].y-c[0].y);
     const widthBottom = Math.hypot(c[2].x-c[3].x, c[2].y-c[3].y);
     const heightLeft = Math.hypot(c[3].x-c[0].x, c[3].y-c[0].y);
@@ -2881,10 +2891,18 @@
 
   function processLoadedImage(img){
     state.originalImg = img;
-    const paperCorners = autoDetectPaperCorners(img);
-    const trimmed = trimCornersToContent(img, paperCorners);
-    state.autoCorners = trimmed.map(p=>({...p}));
-    state.corners = trimmed.map(p=>({...p}));
+    // 표 인쇄선 기준으로 먼저 보정해 두고, 사용자가 모서리를 바꾸지 않으면 이 결과를 그대로 판독에 사용합니다.
+    const rect = rectifyByTableLines(img);
+    state.autoRectified = rect || null;
+    let auto;
+    if (rect && rect.__dispCorners) auto = rect.__dispCorners;
+    else {
+      const paperCorners = autoDetectPaperCorners(img);
+      const trimmed = trimCornersToContent(img, paperCorners);
+      auto = quadLooksValid(trimmed, img) ? trimmed : fallbackCorners(img);
+    }
+    state.autoCorners = auto.map(p=>({...p}));
+    state.corners = auto.map(p=>({...p}));
     setupCornerCanvas();
     setStep(2);
   }
@@ -3003,12 +3021,554 @@
     const heightRight = Math.hypot(c[2].x-c[1].x, c[2].y-c[1].y);
     const outW = Math.round(Math.max(widthTop, widthBottom));
     const outH = Math.round(Math.max(heightLeft, heightRight));
-    state.warpedCanvas = upscaleIfSmall(warpPerspective(state.originalImg, c, outW, outH), 1400);
+    const untouched = state.autoRectified && state.autoCorners && c.every((p, i)=> Math.abs(p.x - state.autoCorners[i].x) < 1 && Math.abs(p.y - state.autoCorners[i].y) < 1);
+    state.warpedCanvas = untouched ? state.autoRectified : upscaleIfSmall(warpPerspective(state.originalImg, c, outW, outH), 1400);
     state.croppedDataUrl = state.warpedCanvas.toDataURL('image/png');
     document.getElementById('ocr-crop-preview').src = state.croppedDataUrl;
     setStep(3);
     await runOcr(state.croppedDataUrl);
   });
+
+
+
+  // =====================================================================
+  //  표 인쇄선 기준 원근·기울기 보정 (v7)
+  //  · 종이 모서리 대신 표의 가장 긴 가로선(위·아래)과 세로선(왼쪽·오른쪽)을 직접 찾아
+  //    그 네 선이 실제로 직사각형이라는 점을 이용해 사진을 반듯하게 폅니다.
+  //  · 종이가 사진을 꽉 채우거나 가장자리가 잘린 사진에서도 표가 비스듬하게 찌그러지지 않습니다.
+  // =====================================================================
+  function applyHomography(Hm, p){
+    const d = Hm[6]*p.x + Hm[7]*p.y + Hm[8];
+    return { x: (Hm[0]*p.x + Hm[1]*p.y + Hm[2]) / d, y: (Hm[3]*p.x + Hm[4]*p.y + Hm[5]) / d };
+  }
+  function lineIntersect(a, b){
+    // 선: {p:{x,y}, d:{x,y}} (점 + 방향)
+    const det = a.d.x * b.d.y - a.d.y * b.d.x;
+    if (Math.abs(det) < 1e-9) return null;
+    const t = ((b.p.x - a.p.x) * b.d.y - (b.p.y - a.p.y) * b.d.x) / det;
+    return { x: a.p.x + a.d.x * t, y: a.p.y + a.d.y * t };
+  }
+  function houghLines(mask, W, H, vertical, minVotes){
+    // vertical=false: 거의 가로인 선 (y = y0 + x*tan a), true: 거의 세로인 선 (x = x0 + y*tan a)
+    const angs = [];
+    for (let a = -20; a <= 20.001; a += 0.25) angs.push(a * Math.PI / 180);
+    const len = vertical ? H : W, span = vertical ? W : H;
+    const off = len, nR = span + 2 * len;
+    const acc = new Int32Array(angs.length * nR);
+    const tans = angs.map(Math.tan);
+    for (let y = 0; y < H; y++){
+      for (let x = 0; x < W; x++){
+        if (!mask[y*W + x]) continue;
+        const u = vertical ? y : x, v = vertical ? x : y;   // v = r0 + u*tan
+        for (let i = 0; i < angs.length; i++){
+          const r = Math.round(v - u * tans[i]) + off;
+          if (r >= 0 && r < nR) acc[i*nR + r]++;
+        }
+      }
+    }
+    const peaks = [];
+    const used = new Uint8Array(acc.length);
+    for (let iter = 0; iter < 60; iter++){
+      let best = -1, bv = minVotes;
+      for (let k = 0; k < acc.length; k++) if (!used[k] && acc[k] > bv){ bv = acc[k]; best = k; }
+      if (best < 0) break;
+      const ai = Math.floor(best / nR), ri = best % nR;
+      peaks.push({ a: angs[ai], r0: ri - off, votes: bv, vertical });
+      // 주변 억제 (같은 선의 중복 검출 방지)
+      for (let i = Math.max(0, ai - 16); i <= Math.min(angs.length - 1, ai + 16); i++)
+        for (let r = Math.max(0, ri - 7); r <= Math.min(nR - 1, ri + 7); r++) used[i*nR + r] = 1;
+    }
+    return peaks;
+  }
+  function peakToLine(pk){
+    const t = Math.tan(pk.a);
+    return pk.vertical ? { p: { x: pk.r0, y: 0 }, d: { x: t, y: 1 } } : { p: { x: 0, y: pk.r0 }, d: { x: 1, y: t } };
+  }
+
+  function rectifyByTableLines(img){
+    try {
+      const S = 1000 / Math.max(img.width, img.height);
+      const W = Math.round(img.width * S), H = Math.round(img.height * S);
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const cx = c.getContext('2d'); cx.drawImage(img, 0, 0, W, H);
+      const data = cx.getImageData(0, 0, W, H).data;
+      const gray = new Uint8ClampedArray(W * H), sat = new Uint8ClampedArray(W * H);
+      for (let i = 0; i < W * H; i++){
+        const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
+        gray[i] = 0.299*r + 0.587*g + 0.114*b;
+        sat[i] = Math.max(r, g, b) - Math.min(r, g, b);
+      }
+      // 국소 평균보다 확실히 어두운 무채색 픽셀 = 인쇄선 후보 (그림자·조명 차이에 강함)
+      const R = 12, iw = W + 1;
+      const integ = new Float64Array((W + 1) * (H + 1));
+      for (let y = 0; y < H; y++){ let row = 0; for (let x = 0; x < W; x++){ row += gray[y*W+x]; integ[(y+1)*iw + x + 1] = integ[y*iw + x + 1] + row; } }
+      const dark = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++){
+        const ya = Math.max(0, y - R), yb = Math.min(H, y + R + 1);
+        for (let x = 0; x < W; x++){
+          const xa = Math.max(0, x - R), xb = Math.min(W, x + R + 1);
+          const mean = (integ[yb*iw + xb] - integ[ya*iw + xb] - integ[yb*iw + xa] + integ[ya*iw + xa]) / ((yb - ya) * (xb - xa));
+          dark[y*W + x] = (gray[y*W+x] < mean - 28 && sat[y*W+x] < 60) ? 1 : 0;
+        }
+      }
+      // 얇은 가로선 / 세로선 픽셀만 (검은 제목 띠·굵은 글자 덩어리 제외)
+      const hm = new Uint8Array(W * H), vm = new Uint8Array(W * H);
+      for (let y = 4; y < H - 4; y++) for (let x = 4; x < W - 4; x++){
+        const o = y*W + x; if (!dark[o]) continue;
+        if (!dark[o - 4*W] && !dark[o + 4*W]) hm[o] = 1;
+        if (!dark[o - 4] && !dark[o + 4]) vm[o] = 1;
+      }
+      const hp = houghLines(hm, W, H, false, W * 0.28);
+      const vp = houghLines(vm, W, H, true, H * 0.18);
+      if (hp.length < 2 || vp.length < 2) return null;
+      // 주 방향에서 크게 벗어난 선 제외
+      const med = arr => arr.slice().sort((a, b) => a - b)[Math.floor(arr.length / 2)];
+      const ha = med(hp.slice(0, 6).map(p => p.a)), va = med(vp.slice(0, 6).map(p => p.a));
+      const hMax = Math.max(...hp.map(p => p.votes)), vMax = Math.max(...vp.map(p => p.votes));
+      const hs = hp.filter(p => Math.abs(p.a - ha) < 0.08 && p.votes >= hMax * 0.62);
+      const vs = vp.filter(p => Math.abs(p.a - va) < 0.08 && p.votes >= vMax * 0.45);
+      if (hs.length < 2 || vs.length < 2) return null;
+      const yAt = (pk, x) => pk.r0 + x * Math.tan(pk.a), xAt = (pk, y) => pk.r0 + y * Math.tan(pk.a);
+      const top = hs.reduce((a, b) => yAt(b, W/2) < yAt(a, W/2) ? b : a);
+      const bot = hs.reduce((a, b) => yAt(b, W/2) > yAt(a, W/2) ? b : a);
+      const lft = vs.reduce((a, b) => xAt(b, H/2) < xAt(a, H/2) ? b : a);
+      const rgt = vs.reduce((a, b) => xAt(b, H/2) > xAt(a, H/2) ? b : a);
+      const L = [top, rgt, bot, lft].map(peakToLine);
+      const tl = lineIntersect(L[0], L[3]), tr = lineIntersect(L[0], L[1]), br = lineIntersect(L[2], L[1]), bl = lineIntersect(L[2], L[3]);
+      if (!tl || !tr || !br || !bl) return null;
+      const tw = (Math.hypot(tr.x - tl.x, tr.y - tl.y) + Math.hypot(br.x - bl.x, br.y - bl.y)) / 2;
+      const th = (Math.hypot(bl.x - tl.x, bl.y - tl.y) + Math.hypot(br.x - tr.x, br.y - tr.y)) / 2;
+      if (tw < W * 0.3 || th < H * 0.12) return null;
+      // 원본 좌표로 환산
+      const src = [tl, tr, br, bl].map(p => ({ x: p.x / S, y: p.y / S }));
+      const TW = tw / S, TH = th / S;
+      const dstQ = [{x:0,y:0},{x:TW,y:0},{x:TW,y:TH},{x:0,y:TH}];
+      const toDst = solveHomography(src, dstQ);
+      // 사진 전체가 펴진 좌표에서 차지하는 범위 (표 위쪽 머리글·차량번호까지 포함되도록)
+      const ext = [{x:0,y:0},{x:img.width,y:0},{x:img.width,y:img.height},{x:0,y:img.height}].map(p => applyHomography(toDst, p));
+      let x0 = Math.max(-TW * 0.9, Math.min(...ext.map(p => p.x)));
+      let x1 = Math.min(TW * 1.4, Math.max(...ext.map(p => p.x)));
+      let y0 = Math.max(-TH * 1.6, Math.min(...ext.map(p => p.y)));
+      let y1 = Math.min(TH * 1.9, Math.max(...ext.map(p => p.y)));
+      if (!(x1 > x0 && y1 > y0)) return null;
+      const scale = Math.min(2.2, 1800 / (x1 - x0));
+      const outW = Math.round((x1 - x0) * scale), outH = Math.round((y1 - y0) * scale);
+      if (outH > 4200) return null;
+      const toSrc = solveHomography(dstQ, src);
+      // 원본 픽셀 (양선형 보간, 바깥은 흰색)
+      const sc = document.createElement('canvas'); sc.width = img.width; sc.height = img.height;
+      sc.getContext('2d').drawImage(img, 0, 0);
+      const sd = sc.getContext('2d').getImageData(0, 0, img.width, img.height).data;
+      const out = document.createElement('canvas'); out.width = outW; out.height = outH;
+      const octx = out.getContext('2d'); const od = octx.createImageData(outW, outH);
+      const iwS = img.width, ihS = img.height;
+      for (let y = 0; y < outH; y++){
+        const dy = y0 + y / scale;
+        for (let x = 0; x < outW; x++){
+          const dx = x0 + x / scale;
+          const dd = toSrc[6]*dx + toSrc[7]*dy + 1;
+          const sx = (toSrc[0]*dx + toSrc[1]*dy + toSrc[2]) / dd, sy = (toSrc[3]*dx + toSrc[4]*dy + toSrc[5]) / dd;
+          const o = (y*outW + x) * 4;
+          if (sx < 0 || sy < 0 || sx >= iwS - 1 || sy >= ihS - 1){ od.data[o] = od.data[o+1] = od.data[o+2] = 255; od.data[o+3] = 255; continue; }
+          const ix = Math.floor(sx), iy = Math.floor(sy), fx = sx - ix, fy = sy - iy;
+          const i00 = (iy*iwS + ix) * 4, i10 = i00 + 4, i01 = i00 + iwS*4, i11 = i01 + 4;
+          for (let ch = 0; ch < 3; ch++){
+            od.data[o+ch] = (sd[i00+ch]*(1-fx) + sd[i10+ch]*fx) * (1-fy) + (sd[i01+ch]*(1-fx) + sd[i11+ch]*fx) * fy;
+          }
+          od.data[o+3] = 255;
+        }
+      }
+      octx.putImageData(od, 0, 0);
+      // 화면 표시용(2단계 영역 확인) 원본 좌표 모서리
+      const dispCorners = [{x:x0,y:y0},{x:x1,y:y0},{x:x1,y:y1},{x:x0,y:y1}].map(p => applyHomography(toSrc, p))
+        .map(p => ({ x: Math.max(0, Math.min(img.width, p.x)), y: Math.max(0, Math.min(img.height, p.y)) }));
+      out.__dispCorners = dispCorners;
+      return out;
+    } catch (e){
+      console.warn('표 선 기준 보정 실패', e);
+      return null;
+    }
+  }
+
+  // 종이 모서리 검출 결과가 정상적인 사각형인지 검사 (비정상이면 찌그러진 보정을 쓰지 않음)
+  function quadLooksValid(c, img){
+    const ang = (a, b, d) => {
+      const v1 = { x: a.x - b.x, y: a.y - b.y }, v2 = { x: d.x - b.x, y: d.y - b.y };
+      return Math.acos(Math.max(-1, Math.min(1, (v1.x*v2.x + v1.y*v2.y) / (Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y) || 1)))) * 180 / Math.PI;
+    };
+    for (let i = 0; i < 4; i++){
+      const a = ang(c[(i + 3) % 4], c[i], c[(i + 1) % 4]);
+      if (Math.abs(a - 90) > 14) return false;
+    }
+    const top = Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y), bot = Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y);
+    const lef = Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y), rig = Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y);
+    if (Math.min(top, bot) / Math.max(top, bot) < 0.82 || Math.min(lef, rig) / Math.max(lef, rig) < 0.82) return false;
+    return top * lef > img.width * img.height * 0.2;
+  }
+
+  // =====================================================================
+  //  표 격자(행·열) 자동 인식 → 칸(셀) 단위로 잘라 판독  (열 밀림 방지)
+  //  · 굵은 세로선(배송분|회수분 경계)을 기준으로 좌우 6칸씩 12개 수량 열의 실제 경계를 찾습니다.
+  //  · 가로선으로 고객 행을 나눈 뒤, 각 칸을 분리된 이미지로 잘라 라벨을 붙여 Gemini에 보냅니다.
+  //    → 손글씨 숫자가 "어느 열인지"를 모델이 추측하지 않아도 되므로 옆 칸으로 밀리는 오류가 사라집니다.
+  // =====================================================================
+  const QTY_KEYS = ['kimchi','tofu','namul','kcp_kimchi','kcp_tofu','kcp_namul'];
+  const QTY_LABELS = ['김치','두부','나물','KCP김치','KCP두부','KCP나물'];
+
+  function gridGroups(profile, thr){
+    const groups = [];
+    let s = -1;
+    for (let i = 0; i <= profile.length; i++){
+      const on = i < profile.length && profile[i] >= thr;
+      if (on && s < 0) s = i;
+      if (!on && s >= 0){
+        let best = s, bv = -1, sum = 0;
+        for (let k = s; k < i; k++){ sum += profile[k]; if (profile[k] > bv){ bv = profile[k]; best = k; } }
+        groups.push({ start: s, end: i - 1, center: (s + i - 1) / 2, peak: best, width: i - s, strength: sum / (i - s) });
+        s = -1;
+      }
+    }
+    return groups;
+  }
+
+  function detectTableGrid(canvas){
+    try {
+      const W = canvas.width, H = canvas.height;
+      const data = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+      // 인쇄된 검은 선만 남기기: 어둡고(밝기 낮음) 채도가 낮은 픽셀 (빨간/파란 펜 표시는 제외)
+      const gray = new Uint8ClampedArray(W * H);
+      for (let i = 0; i < W * H; i++){
+        const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
+        gray[i] = 0.299*r + 0.587*g + 0.114*b;
+      }
+      // 국소 평균보다 어두운 무채색 픽셀 (흐린 인쇄선·그림자에도 강하게)
+      const R = 14, iw = W + 1;
+      const integ = new Float64Array((W + 1) * (H + 1));
+      for (let y = 0; y < H; y++){ let row = 0; for (let x = 0; x < W; x++){ row += gray[y*W+x]; integ[(y+1)*iw + x + 1] = integ[y*iw + x + 1] + row; } }
+      const dark = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++){
+        const ya = Math.max(0, y - R), yb = Math.min(H, y + R + 1);
+        for (let x = 0; x < W; x++){
+          const xa = Math.max(0, x - R), xb = Math.min(W, x + R + 1);
+          const mean = (integ[yb*iw + xb] - integ[ya*iw + xb] - integ[yb*iw + xa] + integ[ya*iw + xa]) / ((yb - ya) * (xb - xa));
+          const i = y*W + x, r = data[i*4], g = data[i*4+1], b = data[i*4+2];
+          dark[i] = (gray[i] < mean - 22 && (Math.max(r, g, b) - Math.min(r, g, b)) < 70) ? 1 : 0;
+        }
+      }
+      // ---- 가로선: 행 방향으로 긴 어두운 구간 (최대 연속 길이 기준, 굴곡 대비 2px 허용) ----
+      const hProf = new Float32Array(H);
+      for (let y = 0; y < H; y++){
+        let run = 0, best = 0, gap = 0;
+        for (let x = 0; x < W; x++){
+          const on = dark[y*W+x] || (y > 0 && dark[(y-1)*W+x]) || (y < H-1 && dark[(y+1)*W+x]);
+          if (on){ run += 1 + gap; gap = 0; if (run > best) best = run; }
+          else if (run > 0 && gap < 10){ gap++; }
+          else { run = 0; gap = 0; }
+        }
+        hProf[y] = best / W;
+      }
+      let hLines = gridGroups(hProf, 0.5).filter(g => g.width <= Math.max(6, H * 0.012));
+      if (hLines.length < 4) return null;
+      // 수량 표 = 간격이 촘촘하게 이어지는 가로선 묶음 중 선이 가장 많은 묶음 (아래쪽 TOTAL·센터검수 칸 제외)
+      const clusters = [[hLines[0]]];
+      for (let i = 1; i < hLines.length; i++){
+        if (hLines[i].center - hLines[i-1].center > H * 0.1) clusters.push([]);
+        clusters[clusters.length - 1].push(hLines[i]);
+      }
+      hLines = clusters.reduce((a, b) => b.length > a.length ? b : a);
+      if (hLines.length < 4) return null;
+      const tableTop = hLines[0].center, tableBot = hLines[hLines.length - 1].center;
+      const tH = tableBot - tableTop;
+      if (tH < H * 0.12) return null;
+      // ---- 세로선: 표 높이 범위에서 열마다 어두운 픽셀 비율 (±1px 허용) ----
+      const vProf = new Float32Array(W);
+      const y0 = Math.round(tableTop), y1 = Math.round(tableBot);
+      for (let x = 1; x < W - 1; x++){
+        let cnt = 0;
+        for (let y = y0; y <= y1; y++){
+          const o = y*W + x;
+          if (dark[o] || dark[o-1] || dark[o+1]) cnt++;
+        }
+        vProf[x] = cnt / (y1 - y0 + 1);
+      }
+      const vLines = gridGroups(vProf, 0.55);
+      if (vLines.length < 8) return null;
+      // 굵은 경계선 = 표 가운데 영역에서 두께가 가장 두꺼운 세로선
+      const mid = vLines.filter(g => g.center > W * 0.3 && g.center < W * 0.85);
+      if (!mid.length) return null;
+      const thick = mid.reduce((a, b) => (b.width * b.strength > a.width * a.strength ? b : a));
+      const medW = vLines.map(g => g.width).sort((a, b) => a - b)[Math.floor(vLines.length / 2)];
+      if (thick.width < medW * 1.6) return null;
+      const left = vLines.filter(g => g.end < thick.start).map(g => g.center);
+      const right = vLines.filter(g => g.start > thick.end).map(g => g.center);
+      if (left.length < 4 || right.length < 4) return null;
+      // 열 너비 추정: 굵은 선 양옆 간격의 중앙값
+      const sp = [];
+      for (let i = Math.max(0, left.length - 6); i < left.length - 1; i++) sp.push(left[i+1] - left[i]);
+      sp.push(thick.start - left[left.length - 1]);
+      sp.push(right[0] - thick.end);
+      for (let i = 0; i < Math.min(5, right.length - 1); i++) sp.push(right[i+1] - right[i]);
+      sp.sort((a, b) => a - b);
+      const colW = sp[Math.floor(sp.length / 2)];
+      if (!(colW > W * 0.025 && colW < W * 0.15)) return null;
+      const snap = (target, cands) => {
+        let best = null, bd = colW * 0.35;
+        cands.forEach(c => { const d = Math.abs(c - target); if (d < bd){ bd = d; best = c; } });
+        return best;
+      };
+      const dB = [thick.start];   // 배송 김치 ~ KCP나물 경계 (오른쪽→왼쪽)
+      for (let k = 1; k <= 6; k++){ const s = snap(dB[k-1] - colW, left); dB.push(s != null ? s : dB[k-1] - colW); }
+      dB.reverse();
+      const rB = [thick.end];
+      for (let k = 1; k <= 6; k++){ const s = snap(rB[k-1] + colW, right); rB.push(s != null ? s : rB[k-1] + colW); }
+      const cols = [];
+      for (let k = 0; k < 6; k++) cols.push({ x0: dB[k], x1: dB[k+1], section: 'delivery', key: QTY_KEYS[k] });
+      for (let k = 0; k < 6; k++) cols.push({ x0: rB[k], x1: rB[k+1], section: 'return', key: QTY_KEYS[k] });
+      const widths = cols.map(c => c.x1 - c.x0);
+      if (Math.min(...widths) < colW * 0.55 || Math.max(...widths) > colW * 1.6 || rB[6] > W + 2 || dB[0] < 0) return null;
+      // ---- 행: 세로 칸선이 실제로 그려진 높이 범위 = 수량 칸 영역 (위 정보 칸·아래 여백 제외) ----
+      const bxs = [];
+      cols.forEach((c, k) => { if (k !== 6) bxs.push(c.x0); });   // 굵은 선 쪽 경계는 제외
+      bxs.push(cols[11].x1);
+      const pres = new Float32Array(H);
+      for (let y = 0; y < H; y++){
+        let n = 0;
+        bxs.forEach(bx => {
+          const xc = Math.round(bx);
+          for (let dx = -4; dx <= 4; dx++){ const xx = xc + dx; if (xx >= 0 && xx < W && dark[y*W + xx]){ n++; break; } }
+        });
+        pres[y] = n / bxs.length;
+      }
+      // 연속으로 칸선이 보이는 가장 긴 세로 구간
+      let qs = -1, qe = -1, cs = -1, miss = 0;
+      for (let y = 0; y <= H; y++){
+        const on = y < H && pres[y] >= 0.7;
+        if (on){ if (cs < 0) cs = y; miss = 0; }
+        else if (cs >= 0){
+          miss++;
+          if (miss > 6 || y === H){ const ce = y - miss; if (ce - cs > qe - qs){ qs = cs; qe = ce; } cs = -1; miss = 0; }
+        }
+      }
+      if (qs < 0 || qe - qs < H * 0.08) return null;
+      const qx0 = Math.round(dB[0]), qx1 = Math.round(Math.min(W - 1, rB[6]));
+      const rowProf = new Float32Array(H);
+      for (let y = 0; y < H; y++){
+        let cnt = 0;
+        for (let x = qx0; x <= qx1; x++){
+          let hit = 0;
+          for (let dy = -3; dy <= 3 && !hit; dy++){ const yy = y + dy; if (yy >= 0 && yy < H && dark[yy*W + x]) hit = 1; }
+          cnt += hit;
+        }
+        rowProf[y] = cnt / (qx1 - qx0 + 1);
+      }
+      const rLines = gridGroups(rowProf, 0.55).map(g => g.center).filter(y => y >= qs - 8 && y <= qe + 8);
+      // 첫 칸(김치/두부… 머리글) 다음 선부터가 고객 행
+      if (rLines.length < 3) return null;
+      const headH = rLines[1] - rLines[0];
+      const rows = [];
+      for (let i = 1; i < rLines.length - 1; i++){
+        const ry0 = rLines[i], ry1 = rLines[i+1];
+        if (ry1 - ry0 < headH * 0.45) continue;   // 너무 얇은 띠는 선 두께로 간주
+        rows.push({ y0: ry0, y1: ry1 });
+      }
+      const heads = [rLines[0]];
+      if (!rows.length) return null;
+      const leftLines = vLines.map(g => g.center).filter(x => x < dB[0] - colW * 0.6).sort((a, b) => b - a);
+      let custX0 = leftLines.length >= 2 ? leftLines[1] : (leftLines.length ? leftLines[0] - colW * 1.4 : dB[0] - colW * 5.2);
+      if (dB[0] - custX0 > colW * 7.5 || dB[0] - custX0 < colW * 2.5) custX0 = dB[0] - colW * 5.2;
+      custX0 = Math.max(0, custX0);
+      return { cols, rows, colW, thickX: (thick.start + thick.end) / 2, headerTop: heads[0], qtyTop: qs, qtyBot: qe, custX0, custX1: dB[0] };
+    } catch (e){
+      console.warn('표 격자 인식 실패', e);
+      return null;
+    }
+  }
+
+  // 고객 행 × 12칸을 각각 잘라 라벨을 붙인 "셀 시트" 이미지를 만듭니다.
+  function buildCellSheet(canvas, grid, rowIdxs, opts){
+    opts = opts || {};
+    const cellW = opts.cellW || 132, cellH = opts.cellH || 96, gapMid = 26, gap = 6, headH = 46;
+    const custW = opts.custW || Math.round(cellH * 3.4);
+    const labelW = 64 + custW + 10;
+    const n = rowIdxs.length;
+    const out = document.createElement('canvas');
+    out.width = labelW + 12 * cellW + 11 * gap + gapMid + 16;
+    out.height = headH + n * (cellH + gap) + 10;
+    const ctx = out.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, out.width, out.height);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const colX = (k)=> labelW + k * (cellW + gap) + (k >= 6 ? gapMid : 0);
+    // 머리글
+    ctx.font = 'bold 15px sans-serif';
+    for (let k = 0; k < 12; k++){
+      const x = colX(k);
+      ctx.fillStyle = k < 6 ? '#dbeafe' : '#dcfce7';
+      ctx.fillRect(x, 4, cellW, headH - 10);
+      ctx.fillStyle = '#0f172a';
+      ctx.fillText((k < 6 ? '배송 ' : '회수 ') + QTY_LABELS[k % 6], x + cellW / 2, 4 + (headH - 10) / 2);
+    }
+    ctx.fillStyle = '#f1f5f9'; ctx.fillRect(64, 4, custW, headH - 10);
+    ctx.fillStyle = '#0f172a'; ctx.font = 'bold 15px sans-serif';
+    ctx.fillText('고객번호 · 고객명', 64 + custW / 2, 4 + (headH - 10) / 2);
+    rowIdxs.forEach((ri, n2)=>{
+      const r = grid.rows[ri];
+      const yTop = headH + n2 * (cellH + gap);
+      ctx.fillStyle = '#0f172a'; ctx.font = 'bold 20px sans-serif';
+      ctx.fillText('행' + (n2 + 1), 32, yTop + cellH / 2);
+      // 고객번호·고객명 칸 (인쇄 글자) — 비율 유지
+      const cw0 = grid.custX1 - grid.custX0, ch0 = r.y1 - r.y0;
+      const k0 = Math.min(custW / cw0, cellH / ch0);
+      const dw0 = cw0 * k0, dh0 = ch0 * k0;
+      ctx.drawImage(canvas, grid.custX0, r.y0, cw0, ch0, 64, yTop + (cellH - dh0) / 2, dw0, dh0);
+      ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1; ctx.strokeRect(64.5, yTop + 0.5, custW - 1, cellH - 1);
+      grid.cols.forEach((c, k)=>{
+        const cw = c.x1 - c.x0, ch = r.y1 - r.y0;
+        const px = cw * 0.22, py = ch * 0.12;
+        const sx = Math.max(0, c.x0 - px), sy = Math.max(0, r.y0 - py);
+        const sw = Math.min(canvas.width - sx, cw + 2 * px), sh = Math.min(canvas.height - sy, ch + 2 * py);
+        const dx = colX(k);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(dx, yTop, cellW, cellH); ctx.clip();
+        ctx.drawImage(canvas, sx, sy, sw, sh, dx, yTop, cellW, cellH);
+        // 실제 칸 경계 = 빨간 사각형 (바깥은 옆 칸이 살짝 보이는 여유분)
+        const fx = cellW / sw, fy = cellH / sh;
+        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5;
+        ctx.strokeRect(dx + (c.x0 - sx) * fx, yTop + (r.y0 - sy) * fy, cw * fx, ch * fy);
+        ctx.restore();
+        ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1; ctx.strokeRect(dx + 0.5, yTop + 0.5, cellW - 1, cellH - 1);
+      });
+    });
+    return out;
+  }
+
+  function cellSheetPrompt(nRows){
+    return `이 이미지는 「대상(주) P-BOX 입출고 기록일지」의 손글씨 수량 칸을 칸(셀)마다 따로 잘라서 정리한 표입니다.
+- 가로줄 = 고객 행(행1 ~ 행${nRows}), 세로줄 = 맨 위 머리글에 적힌 열(배송 김치 … 회수 KCP나물)입니다.
+- 각 행 맨 왼쪽 칸은 그 행의 인쇄된 고객번호(숫자 7자리 또는 C로 시작)와 고객명입니다. 보이는 그대로 옮기십시오. 인쇄 글자가 없는 빈 행이면 null.
+- 각 조각 안의 "빨간 사각형"이 실제 칸의 경계입니다. 빨간 사각형 바깥의 가장자리는 옆 칸이 살짝 보이는 여유분이므로 무시하십시오.
+- 손글씨 숫자의 중심(대부분)이 빨간 사각형 안에 있을 때만 그 칸의 값입니다. 숫자가 칸 오른쪽 선에 걸쳐 있어도 중심이 안쪽이면 그 칸 값입니다.
+- 열 위치는 이미 정해져 있으므로 숫자를 다른 열로 옮기거나 합치지 마십시오. 각 칸은 그 칸에 보이는 숫자만 읽습니다.
+- 체크 표시(✓, V, √), 동그라미, 화살표, 밑줄, 빨간 펜 메모는 숫자가 아닙니다. 숫자 위에 체크가 겹쳐 있으면 체크를 빼고 숫자만 읽으십시오. (예: 7 위에 V가 겹쳐도 7)
+- 1과 7: 위쪽에 가로 획(또는 꺾인 머리)이 있으면 7, 세로 획 하나뿐이면 1. 4와 9, 5와 6, 3과 8, 0과 6도 획 모양을 따라가며 구분하십시오.
+- 두 자리 숫자(예: 12, 18, 23)는 하나의 수로 읽습니다.
+- 빈 칸은 null, 실제로 0이 적혀 있으면 0입니다. 확실하지 않으면 값을 적고 uncertain에 그 칸 이름을 넣으십시오.
+
+반드시 아래 JSON만 출력하십시오(설명·코드블록 금지). rows는 행1부터 행${nRows}까지 정확히 ${nRows}개입니다.
+{"rows":[{"row":1,"customer_number":"1002391","customer_name":"고객명","delivery":[김치,두부,나물,KCP김치,KCP두부,KCP나물],"return":[김치,두부,나물,KCP김치,KCP두부,KCP나물],"uncertain":["배송 김치"]}]}
+각 배열 값은 숫자 또는 null 입니다.`;
+  }
+
+  function sheetRowToObj(arr){
+    const o = {};
+    QTY_KEYS.forEach((k, i)=>{
+      let v = Array.isArray(arr) ? arr[i] : null;
+      if (v === '' || v === undefined) v = null;
+      if (v !== null){ const n = Number(String(v).replace(/[^0-9.]/g, '')); v = isNaN(n) || String(v).trim() === '' ? null : n; }
+      o[k] = v;
+    });
+    return o;
+  }
+
+  // 1차(전체 판독) 결과를 칸 단위 판독 결과로 교정합니다.
+  //  · 표에서 찾은 모든 고객 행을 칸 시트로 읽고, 고객번호로 1차 결과와 짝을 맞춥니다.
+  //  · 1차와 칸 판독이 다른 칸은 그 행만 크게 잘라 한 번 더 읽어 다수결로 정합니다.
+  const normCust = v => String(v == null ? '' : v).toUpperCase().replace(/[^0-9A-Z]/g, '');
+  async function refineRowsWithGrid(rows, canvas, onProgress){
+    const grid = detectTableGrid(canvas);
+    if (!grid) return { rows, used: false };
+    const all = grid.rows.map((_, i)=> i);
+    const CHUNK = 8;
+    const sheetVals = [];
+    for (let s0 = 0; s0 < all.length; s0 += CHUNK){
+      const part = all.slice(s0, s0 + CHUNK);
+      if (onProgress) onProgress('칸 단위로 숫자를 읽는 중... (' + Math.min(s0 + CHUNK, all.length) + '/' + all.length + '행)');
+      const sheet = buildCellSheet(canvas, grid, part);
+      const text = await callClaude([imageFromDataUrl(sheet.toDataURL('image/png'))], cellSheetPrompt(part.length));
+      const parsed = parseJsonLoose(text);
+      const list = Array.isArray(parsed.rows) ? parsed.rows : [];
+      part.forEach((gi, j)=>{
+        const hit = list.find(x => Number(x.row) === j + 1) || list[j];
+        sheetVals[gi] = hit ? { cn: hit.customer_number, name: hit.customer_name, delivery: sheetRowToObj(hit.delivery), return: sheetRowToObj(hit.return), uncertain: hit.uncertain || [] } : null;
+      });
+    }
+    const allNull = sv => ['delivery','return'].every(sec => QTY_KEYS.every(k => sv[sec][k] === null));
+    // 고객번호로 1차 결과와 짝짓기 (못 찾으면 같은 순서의 행을 사용)
+    const usedA = new Set();
+    const pairs = [];
+    grid.rows.forEach((gr, gi)=>{
+      const sv = sheetVals[gi];
+      if (!sv) return;
+      const key = normCust(sv.cn);
+      let ai = key ? rows.findIndex((r, i)=> !usedA.has(i) && normCust(r.customer_number) === key) : -1;
+      if (ai < 0 && !key && allNull(sv)) return;   // 인쇄 글자도 숫자도 없는 빈 행
+      if (ai < 0 && key){
+        // 번호 한두 글자 오독 대비: 가장 비슷한 번호 (자리수 같고 1글자 차이)
+        ai = rows.findIndex((r, i)=>{ const b = normCust(r.customer_number); if (usedA.has(i) || b.length !== key.length) return false; let d = 0; for (let q = 0; q < b.length; q++) if (b[q] !== key[q]) d++; return d <= 1; });
+      }
+      if (ai < 0 && !key && gi < rows.length && !usedA.has(gi)) ai = gi;
+      if (ai >= 0) usedA.add(ai);
+      pairs.push({ gi, ai, sv });
+    });
+    if (!pairs.length) return { rows, used: false };
+    const out = [];
+    for (const { gi, ai, sv } of pairs){
+      const r0 = ai >= 0 ? rows[ai] : {
+        customer_number: sv.cn || null, customer_name: sv.name || null,
+        delivery: {}, return: {}, confidence: 0.6, uncertain_fields: [], addedByGrid: true
+      };
+      const diffs = [];
+      ['delivery','return'].forEach(sec => QTY_KEYS.forEach(k => {
+        const a = r0[sec] ? (r0[sec][k] ?? null) : null, b = sv[sec][k];
+        if (a !== b) diffs.push(sec + '.' + k);
+      }));
+      let third = null;
+      if (diffs.length){
+        if (onProgress) onProgress((r0.customer_name || ('행 ' + (gi + 1))) + ' — 다르게 읽힌 칸 재확인 중...');
+        try {
+          const big = buildCellSheet(canvas, grid, [gi], { cellW: 210, cellH: 150 });
+          const t = await callClaude([imageFromDataUrl(big.toDataURL('image/png'))], cellSheetPrompt(1));
+          const p = parseJsonLoose(t);
+          const h = (p.rows || [])[0];
+          if (h) third = { delivery: sheetRowToObj(h.delivery), return: sheetRowToObj(h.return) };
+        } catch(e){}
+      }
+      const merged = { ...r0, delivery: {}, return: {}, gridChecked: true };
+      if (!merged.customer_number && sv.cn) merged.customer_number = sv.cn;
+      if (!merged.customer_name && sv.name) merged.customer_name = sv.name;
+      const unc = new Set((sv.uncertain || []).map(String).map(lbl => {
+        const m = /^(배송|회수)\s*(.+)$/.exec(lbl.trim());
+        if (!m) return null;
+        const idx = QTY_LABELS.indexOf(m[2].replace(/\s+/g, ''));
+        return idx < 0 ? null : (m[1] === '배송' ? 'delivery.' : 'return.') + QTY_KEYS[idx];
+      }).filter(Boolean));
+      ['delivery','return'].forEach(sec => QTY_KEYS.forEach(k => {
+        const a = r0[sec] ? (r0[sec][k] ?? null) : null, b = sv[sec][k];
+        let v = b;   // 기본: 칸 위치가 확정된 칸 판독 값
+        if (a !== b){
+          const c = third ? third[sec][k] : undefined;
+          if (c !== undefined && c === b) v = b;
+          else if (c !== undefined && c === a) v = a;
+          else if (c !== undefined) v = c;
+          if (!(c !== undefined && (c === a || c === b))) unc.add(sec + '.' + k);
+        }
+        merged[sec][k] = v;
+      }));
+      merged.uncertain_fields = Array.from(unc);
+      if (r0.addedByGrid) merged.uncertain_fields.push('customer_number');
+      if ((unc.size || r0.addedByGrid) && (merged.confidence == null || merged.confidence > 0.74)) merged.confidence = 0.74;
+      // 행 좌표로 bbox 교정 (수동 재확인용)
+      const gr = grid.rows[gi];
+      merged.bbox = { x: grid.custX0 / canvas.width, y: gr.y0 / canvas.height, w: (grid.cols[11].x1 - grid.custX0) / canvas.width, h: (gr.y1 - gr.y0) / canvas.height };
+      merged.reverified = true;
+      out.push(merged);
+    }
+    // 칸 판독에서 짝을 못 찾은 1차 행은 확인 필요로 남겨 둡니다.
+    rows.forEach((r, i)=>{ if (!usedA.has(i)) out.push({ ...r, confidence: Math.min(r.confidence ?? 0.5, 0.5), uncertain_fields: Array.from(new Set([...(r.uncertain_fields || []), 'customer_number'])) }); });
+    return { rows: out, used: true, grid };
+  }
+
+  // 개발·점검용: 브라우저 콘솔에서 격자 인식 결과를 확인할 수 있습니다.
+  window.__pboxOcrDebug = { autoCropPage, rectifyByTableLines, detectTableGrid, buildCellSheet };
 
   function imageFromDataUrl(dataUrl){
     const mediaType = dataUrl.substring(5, dataUrl.indexOf(';'));
@@ -3301,6 +3861,8 @@
 14. 표의 빈 행은 고객으로 인식하지 마십시오.
 15. 이미지의 아래쪽에 있는 TOTAL 영역이나 센터검수확인 영역은 추출하지 마십시오.
 16. 배송분/회수분 각각 KCP 김치/KCP 두부/KCP 나물 칸도 일반 김치/두부/나물과 동일하게 빠짐없이 판독하십시오.
+17. 체크 표시(✓, V, √), 동그라미, 화살표, 밑줄, 빨간 펜 메모는 숫자가 아닙니다. 숫자 위에 체크가 겹쳐 있으면 체크를 빼고 숫자만 읽으십시오.
+18. 숫자가 비어 있는 칸을 건너뛰면서 오른쪽 숫자를 왼쪽 칸으로 당기지 마십시오. 각 숫자는 머리글(김치·두부·나물·KCP김치·KCP두부·KCP나물) 바로 아래 같은 세로 칸에 있는지로만 판단합니다.
 
 ━━━━━━━━━━━━━━━━━━━━
 [표 위치 판독 규칙]
@@ -3508,9 +4070,16 @@ ${rowResultSchema()}`;
       state.needsReview = parsed.needs_review;
       state.rows = (parsed.customers || []).map(r=>({...r, reverified:false}));
 
-      document.getElementById('loading-box').textContent = '손글씨 숫자를 셀 단위로 확대해서 한 번 더 대조하는 중입니다...';
-      for (let i=0;i<state.rows.length;i++){
-        state.rows[i] = await recheckRowWithZoom(state.rows[i]);
+      const lb = document.getElementById('loading-box');
+      lb.textContent = '표의 칸 위치를 찾는 중입니다...';
+      const ref = await refineRowsWithGrid(state.rows, state.warpedCanvas, msg=>{ lb.textContent = msg; });
+      if (ref.used){
+        state.rows = ref.rows;
+      } else {
+        lb.textContent = '손글씨 숫자를 셀 단위로 확대해서 한 번 더 대조하는 중입니다...';
+        for (let i=0;i<state.rows.length;i++){
+          state.rows[i] = await recheckRowWithZoom(state.rows[i]);
+        }
       }
       renderResults();
     } catch(err){
@@ -3542,10 +4111,16 @@ ${rowResultSchema()}`;
 
         let rows = (parsed.customers || []).map(r=>({...r, reverified:false, pageIndex, docInfo: pageDoc}));
 
-        document.getElementById('loading-box').textContent =
-          '(' + (p+1) + '/' + pageImages.length + ') 손글씨 숫자를 셀 단위로 재대조하는 중...';
-        for (let i=0;i<rows.length;i++){
-          rows[i] = await recheckRowWithZoom(rows[i], warped, croppedDataUrl);
+        const lb = document.getElementById('loading-box');
+        const pre = '(' + (p+1) + '/' + pageImages.length + ') ';
+        const ref = await refineRowsWithGrid(rows, warped, msg=>{ lb.textContent = pre + msg; });
+        if (ref.used){
+          rows = ref.rows.map(r=>({ ...r, pageIndex, docInfo: pageDoc }));
+        } else {
+          lb.textContent = pre + '손글씨 숫자를 셀 단위로 재대조하는 중...';
+          for (let i=0;i<rows.length;i++){
+            rows[i] = await recheckRowWithZoom(rows[i], warped, croppedDataUrl);
+          }
         }
         state.rows.push(...rows);
       }
