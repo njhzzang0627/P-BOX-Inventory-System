@@ -3921,7 +3921,7 @@
     const body = JSON.stringify({
       contents: [{ role: "user", parts }],
       // temperature/top_p/top_k는 최신 Gemini 3.x 모델에서 지원 중단(deprecated) 예정이라 제외했습니다.
-      generationConfig: { maxOutputTokens: 8192 }
+      generationConfig: { maxOutputTokens: 8192, responseMimeType: 'application/json' }
     });
 
     const maxAttemptsPerModel = 2; // 모델당 재시도 횟수 (총 시도 = 모델 수 × 이 값)
@@ -4009,18 +4009,54 @@
     return out;
   }
 
+  // 문자열("...") 안에 들어간 줄바꿈·탭 등 제어문자를 공백으로 치환 (Bad control character 방지)
+  function sanitizeJsonControlChars(s){
+    let out = '', inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++){
+      const ch = s[i], code = s.charCodeAt(i);
+      if (inStr){
+        if (esc){ esc = false; out += (code < 0x20 ? ' ' : ch); continue; }
+        if (ch === '\\'){ esc = true; out += ch; continue; }
+        if (ch === '"'){ inStr = false; out += ch; continue; }
+        if (code < 0x20 || code === 0x7f){ out += ' '; continue; }
+        out += ch;
+      } else {
+        if (ch === '"') inStr = true;
+        // 문자열 밖의 이상 제어문자(BOM, 제로폭 등)는 제거, 일반 공백/줄바꿈은 유지
+        if (code === 0xfeff || code === 0x200b || (code < 0x20 && ch !== '\n' && ch !== '\r' && ch !== '\t')) continue;
+        out += ch;
+      }
+    }
+    return out;
+  }
+
+  // 파싱 후 문자열 값의 연속 공백 정리
+  function tidyJsonStrings(v){
+    if (typeof v === 'string') return v.replace(/\s+/g,' ').trim();
+    if (Array.isArray(v)) return v.map(tidyJsonStrings);
+    if (v && typeof v === 'object'){ for (const k in v) v[k] = tidyJsonStrings(v[k]); }
+    return v;
+  }
+
   function parseJsonLoose(text){
-    const cleaned = text.replace(/```json/g,'').replace(/```/g,'').trim();
+    const cleaned = String(text||'').replace(/^\uFEFF/,'').replace(/```json/gi,'').replace(/```/g,'').trim();
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
+    if (start < 0 || end <= start) throw new Error('AI 응답에서 JSON 데이터를 찾지 못했습니다. 다시 시도해주세요.');
     const jsonSlice = cleaned.slice(start, end+1);
-    try {
-      return JSON.parse(jsonSlice);
-    } catch (e1) {
-      try {
-        return JSON.parse(repairJsonString(jsonSlice));
-      } catch (e2) {
-        throw e1; // 원래 오류 메시지를 그대로 보여줌
+    const attempts = [
+      () => JSON.parse(jsonSlice),
+      () => JSON.parse(sanitizeJsonControlChars(jsonSlice)),
+      () => JSON.parse(repairJsonString(sanitizeJsonControlChars(jsonSlice))),
+      () => JSON.parse(sanitizeJsonControlChars(repairJsonString(jsonSlice)))
+    ];
+    let firstErr;
+    for (const fn of attempts){
+      try { return tidyJsonStrings(fn()); } catch (e){ if (!firstErr) firstErr = e; }
+    }
+    {
+      {
+        throw new Error('AI 응답 형식 오류(JSON 해석 실패): ' + firstErr.message + ' — 같은 사진으로 다시 판독해주세요.');
       }
     }
   }
