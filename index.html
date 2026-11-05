@@ -438,7 +438,7 @@
         @media print {
             body * { visibility: hidden; }
             #dashboard-fullpage, #dashboard-fullpage * { visibility: visible; }
-            .dp-topbar, .dp-subbar, .dp-nav, #mr-month-select, #mr-print-btn,
+            .dp-topbar, .dp-subbar, .dp-nav, #mr-month-select, #mr-center-select, #mr-print-btn,
             .dp-eyebrow, #dp-body-report > .dp-title, #dp-body-report > .dp-subtitle,
             #dp-body-report > div:nth-child(4) { display:none !important; }
             #mr-report-card { border:none; box-shadow:none; margin-top:0; position:absolute; top:0; left:0; width:100%; }
@@ -1102,6 +1102,14 @@
         .iog-cnt{ font-size:0.7rem; font-weight:700; color:#64748b; background:#f1f5f9; border-radius:6px; padding:1px 6px; margin-left:4px; }
         .iog-btn{ border:none; border-radius:6px; padding:4px 9px; font-size:0.74rem; font-weight:700; cursor:pointer; margin-right:4px; }
         .iog-btn-edit{ background:#eef2ff; color:#3b5bdb; } .iog-btn-ok{ background:#e6f8ee; color:#1a8a52; } .iog-btn-del{ background:#fde3ea; color:#be185d; }
+        .io-filter-bar{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:14px; padding:12px 14px; background:#fff; border:1px solid #e6ebf2; border-radius:12px; box-shadow:0 1px 2px rgba(15,23,42,0.03); }
+        .io-filter-bar .iof-label{ font-size:0.78rem; font-weight:800; color:#475569; }
+        .io-filter-bar input[type=date], .io-filter-bar select{ height:36px; padding:0 10px; border-radius:9px; border:1px solid #d5dde8; font-size:0.84rem; color:#0f172a; background:#fff; }
+        .io-filter-bar .iof-sep{ color:#94a3b8; font-weight:700; }
+        .iof-quick{ height:32px; padding:0 12px; border-radius:8px; border:1px solid #d5dde8; background:#f8fafc; color:#334155; font-size:0.78rem; font-weight:700; cursor:pointer; }
+        .iof-quick.active{ background:#3b5bdb; border-color:#3b5bdb; color:#fff; }
+        .iof-divider{ width:1px; height:24px; background:#e2e8f0; }
+        .iof-summary{ margin-left:auto; font-size:0.78rem; color:#3b5bdb; font-weight:800; background:#eef2ff; padding:6px 10px; border-radius:8px; }
         .io-group-search{ height:38px; padding:0 12px; border-radius:9px; border:1px solid #d5dde8; font-size:0.85rem; min-width:220px; }
         #iog-overlay{ position:fixed; inset:0; z-index:6800; background:rgba(3,7,18,.6); backdrop-filter:blur(3px); align-items:flex-start; justify-content:center; padding:24px 16px; overflow:auto; }
         .iog-box{ background:#fff; color:#0f172a; border-radius:16px; width:min(1400px,100%); box-shadow:0 30px 80px rgba(0,0,0,.35); padding:20px 22px 0; font-family:"Pretendard",sans-serif; }
@@ -1584,6 +1592,8 @@
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span class="dp-label">대상 월</span>
                     <select class="dp-select" id="mr-month-select"></select>
+                    <span class="dp-label" style="margin-left:8px;">센터</span>
+                    <select class="dp-select" id="mr-center-select"><option value="">전체 센터</option></select>
                 </div>
                 <button class="dp-btn-primary" id="mr-print-btn" style="padding:10px 20px;">PDF로 저장 / 인쇄</button>
             </div>
@@ -1930,6 +1940,22 @@
             <div style="display:flex; gap:8px; margin-top:16px;">
                 <button class="dp-chip active" id="io-tab-delivery-btn">배송 부문 P-BOX 입출고</button>
                 <button class="dp-chip" id="io-tab-transport-btn">수송 부문 P-BOX 입출고</button>
+            </div>
+
+            <div class="io-filter-bar" id="io-filter-bar">
+                <span class="iof-label">조회 기간</span>
+                <input type="date" id="io-f-from">
+                <span class="iof-sep">~</span>
+                <input type="date" id="io-f-to">
+                <button class="iof-quick active" data-iof-range="today">오늘</button>
+                <button class="iof-quick" data-iof-range="yesterday">어제</button>
+                <button class="iof-quick" data-iof-range="7d">최근 7일</button>
+                <button class="iof-quick" data-iof-range="month">이번 달</button>
+                <button class="iof-quick" data-iof-range="prevmonth">지난 달</button>
+                <span class="iof-divider"></span>
+                <span class="iof-label">센터</span>
+                <select id="io-f-center"><option value="">전체 센터</option></select>
+                <span class="iof-summary" id="io-f-summary"></span>
             </div>
 
             <div id="io-panel-delivery">
@@ -4795,7 +4821,7 @@ ${rowResultSchema()}`;
       if (tab === 'customers') renderCustomerView();
       if (tab === 'report') renderMonthlyReport();
       if (tab === 'metrics'){ renderExecMetrics(); const rcV = document.getElementById('dm-subview-recovery'); if (rcV && rcV.style.display !== 'none') renderRecoveryView(); }
-      if (tab === 'io') renderIoView();
+      if (tab === 'io'){ iofResetToday(); renderIoView(); }
       if (tab === 'flow') renderFlowView();
     });
   });
@@ -5298,7 +5324,66 @@ ${rowResultSchema()}`;
     document.getElementById('io-panel-delivery').style.display = 'none';
   });
 
+  // ---------------- 입·출고 기록 : 기간 · 센터 조회 ----------------
+  //  · 메뉴에 들어오면 항상 오늘 날짜로 시작하고, 이전 날짜는 기간을 선택해서 조회합니다.
+  //  · 배송 부문/수송 부문 모두 같은 기간·센터 조건이 적용됩니다.
+  function iofYmd(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+  function iofSetRange(kind){
+    const now = new Date(); let from = new Date(now), to = new Date(now);
+    if (kind === 'yesterday'){ from.setDate(now.getDate()-1); to = new Date(from); }
+    else if (kind === '7d'){ from.setDate(now.getDate()-6); }
+    else if (kind === 'month'){ from = new Date(now.getFullYear(), now.getMonth(), 1); }
+    else if (kind === 'prevmonth'){ from = new Date(now.getFullYear(), now.getMonth()-1, 1); to = new Date(now.getFullYear(), now.getMonth(), 0); }
+    document.getElementById('io-f-from').value = iofYmd(from);
+    document.getElementById('io-f-to').value = iofYmd(to);
+    document.querySelectorAll('[data-iof-range]').forEach(b=> b.classList.toggle('active', b.dataset.iofRange === kind));
+  }
+  function iofResetToday(){ iofSetRange('today'); }
+  function iofRange(){
+    let f = document.getElementById('io-f-from').value, t = document.getElementById('io-f-to').value;
+    if (!f && !t){ iofResetToday(); f = t = document.getElementById('io-f-from').value; }
+    if (f && t && f > t){ const x = f; f = t; t = x; }
+    return { from: f ? f.replace(/-/g,'.') : '', to: t ? t.replace(/-/g,'.') : '' };
+  }
+  function iofDateIn(raw){
+    const d = normalizeDateStr(raw); if (!d) return false;
+    const r = iofRange();
+    return (!r.from || d >= r.from) && (!r.to || d <= r.to);
+  }
+  function iofCenter(){ const el = document.getElementById('io-f-center'); return el ? el.value : ''; }
+  function iofPopulateCenters(){
+    const sel = document.getElementById('io-f-center'); if (!sel) return;
+    const prev = sel.value;
+    if (hasFullAccess()){
+      const tr = (typeof loadTransportRecords === 'function') ? loadTransportRecords() : [];
+      const centers = Array.from(new Set([...uniqueCenters(), ...getCenterScopedList().map(it=>it.center), ...tr.map(r=>r.fromName), ...tr.map(r=>r.toName)].filter(c=> c && c !== '-'))).sort((a,b)=> String(a).localeCompare(String(b),'ko'));
+      sel.innerHTML = '<option value="">전체 센터 (' + centers.length + '곳)</option>' + centers.map(c=>'<option value="'+escapeHtml(c)+'">'+escapeHtml(c)+'</option>').join('');
+      sel.disabled = false;
+      if (centers.includes(prev)) sel.value = prev;
+    } else {
+      const my = currentUser ? currentUser.center : '';
+      sel.innerHTML = '<option value="'+escapeHtml(my||'')+'">'+escapeHtml(my||'-')+'</option>';
+      sel.disabled = true;
+    }
+  }
+  function iofUpdateSummary(){
+    const r = iofRange(), el = document.getElementById('io-f-summary'); if (!el) return;
+    const t = todayStr();
+    const period = (r.from === r.to) ? (r.from === t ? '오늘 ' + r.from : r.from) : (r.from + ' ~ ' + r.to);
+    el.textContent = '📅 ' + period + ' · ' + (iofCenter() || '전체 센터');
+  }
+  function iofRefresh(){ iofUpdateSummary(); renderIoDeliveryList(); renderIoTransportList(); }
+  document.querySelectorAll('[data-iof-range]').forEach(b=> b.addEventListener('click', ()=>{ iofSetRange(b.dataset.iofRange); iofRefresh(); }));
+  ['io-f-from','io-f-to'].forEach(id=> document.getElementById(id).addEventListener('change', ()=>{
+    document.querySelectorAll('[data-iof-range]').forEach(b=> b.classList.remove('active'));
+    iofRefresh();
+  }));
+  document.getElementById('io-f-center').addEventListener('change', iofRefresh);
+  iofResetToday();
+
   function renderIoView(){
+    iofPopulateCenters();
+    iofUpdateSummary();
     loadMasterData();
     renderIoDeliveryList();
     renderIoTransportList();
@@ -5316,7 +5401,8 @@ ${rowResultSchema()}`;
   function iogKeyOf(it){ return [it.center || '-', normalizeDateStr(it.date) || String(it.date || '-'), it.driver || '-', it.car || '-'].join('|'); }
   function iogBuildGroups(){
     const map = {};
-    getCenterScopedList().forEach(it=>{
+    const fc = iofCenter();
+    getCenterScopedList().filter(it=> iofDateIn(it.date) && (!fc || it.center === fc)).forEach(it=>{
       const k = iogKeyOf(it);
       const g = map[k] || (map[k] = { key: k, center: it.center || '-', date: normalizeDateStr(it.date) || String(it.date || '-'), driver: it.driver || '-', car: it.car || '-', items: [], d: 0, r: 0 });
       g.items.push(it);
@@ -5335,7 +5421,7 @@ ${rowResultSchema()}`;
     if (cnt) cnt.textContent = '기사 ' + list.length + '건 · 거래처 기록 ' + list.reduce((a, g)=> a + g.items.length, 0) + '건';
     list = list.slice(0, 120);
     if (!list.length){
-      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#94a3b8; padding:16px;">' + (q ? '검색 결과가 없습니다.' : '저장된 데이터가 없습니다.') + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#94a3b8; padding:16px;">' + (q ? '검색 결과가 없습니다.' : '선택한 기간·센터에 저장된 기록이 없습니다. 위에서 조회 기간을 바꿔 보세요.') + '</td></tr>';
       return;
     }
     tbody.innerHTML = list.map(g=>{
@@ -5708,9 +5794,11 @@ ${rowResultSchema()}`;
       const my = currentUser.center;
       list = list.filter(r=> r.fromName === my || r.toName === my);
     }
+    const tfc = iofCenter();
+    list = list.filter(r=> iofDateIn(r.date) && (!tfc || r.fromName === tfc || r.toName === tfc));
     list = list.map((r,i)=> [r,i]).sort((a,b)=> String(a[0].date||'').localeCompare(String(b[0].date||'')) || (a[1]-b[1])).reverse().map(x=> x[0]);
     if (!list.length){
-      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:#94a3b8; padding:16px;">저장된 수송 기록이 없습니다.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:#94a3b8; padding:16px;">선택한 기간·센터에 저장된 수송 기록이 없습니다.</td></tr>';
       return;
     }
     tbody.innerHTML = list.map(rec=>{
@@ -7022,7 +7110,24 @@ ${rowResultSchema()}`;
     if (months.includes(prevVal)) sel.value = prevVal;
   }
 
+  // 월간 리포트 센터 선택 목록 (관리자·부관리자: 전체 센터 선택 가능 / 그 외: 본인 센터 고정)
+  function populateMrCenterSelect(){
+    const sel = document.getElementById('mr-center-select');
+    if (!sel) return;
+    const prev = sel.value;
+    if (hasFullAccess()){
+      const centers = Array.from(new Set([...uniqueCenters(), ...getCenterScopedList().map(it=>it.center).filter(Boolean)])).sort((a,b)=> String(a).localeCompare(String(b),'ko'));
+      sel.innerHTML = '<option value="">전체 센터 (' + centers.length + '곳)</option>' + centers.map(c=>'<option value="'+escapeHtml(c)+'">'+escapeHtml(c)+'</option>').join('');
+      sel.disabled = false;
+      if (centers.includes(prev)) sel.value = prev;
+    } else {
+      const my = currentUser ? currentUser.center : '';
+      sel.innerHTML = '<option value="'+escapeHtml(my||'')+'">'+escapeHtml(my||'-')+'</option>';
+      sel.disabled = true;
+    }
+  }
   document.getElementById('mr-month-select').addEventListener('change', renderMonthlyReport);
+  document.getElementById('mr-center-select').addEventListener('change', renderMonthlyReport);
   document.getElementById('mr-print-btn').addEventListener('click', ()=> window.print());
 
   // 지표 카드에 강조색과 어울리는 아주 옅은 색조 배경을 입힐 때 사용하는 헬퍼
@@ -7039,11 +7144,13 @@ ${rowResultSchema()}`;
 
   function renderMonthlyReport(){
     populateMrMonthSelect();
+    populateMrCenterSelect();
     const month = document.getElementById('mr-month-select').value;
-    const scoped = getCenterScopedList().filter(it => it.sent && (it.date||'').replace(/-/g,'.').slice(0,7) === month);
+    const mrCenter = (document.getElementById('mr-center-select')||{}).value || '';
+    const scoped = getCenterScopedList().filter(it => it.sent && (it.date||'').replace(/-/g,'.').slice(0,7) === month && (!mrCenter || it.center === mrCenter));
 
-    document.getElementById('mr-report-title').textContent = '대상 P-BOX 재고관리 시스템 ' + (month ? month.replace('.', '-') : '-') + ' 월간 수불 리포트';
-    document.getElementById('mr-report-sub').textContent = '저장 데이터 기준 · 생성일 ' + todayStr();
+    document.getElementById('mr-report-title').textContent = '대상 P-BOX 재고관리 시스템 ' + (month ? month.replace('.', '-') : '-') + ' 월간 수불 리포트' + (mrCenter ? ' · ' + mrCenter : '');
+    document.getElementById('mr-report-sub').textContent = '대상 범위: ' + (mrCenter || '전체 센터') + ' · 저장 데이터 기준 · 생성일 ' + todayStr();
 
     const drivers = new Set(scoped.map(it=>it.driver));
 
