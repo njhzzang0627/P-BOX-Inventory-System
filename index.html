@@ -215,7 +215,7 @@
         .doc-info { font-size: 0.75rem; color: var(--text-sub); margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 10px 16px; }
         .doc-info span b { color: #fff; font-weight: 800; margin-left: 4px; }
         #loading-box, #error-box { font-size: 0.8rem; padding: 14px; border-radius: 10px; }
-        #loading-box { color: var(--neon-blue); background: rgba(0,210,255,0.08); }
+        #loading-box { color: var(--neon-blue); background: rgba(0,210,255,0.08); white-space: pre-line; }
         #error-box { color: #fca5a5; background: rgba(239,68,68,0.12); }
 
         .table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
@@ -3929,8 +3929,47 @@
         '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-key-fix-btn">🔑 새 API 키 입력</button></div>';
       const b = document.getElementById('ocr-key-fix-btn');
       if (b) b.onclick = ()=>{ if (promptGeminiKey()) box.style.display = 'none'; };
+    } else if (err && err.isCancel){
+      box.innerHTML = '판독을 중지했습니다. 다시 판독하려면 아래 버튼을 눌러주세요.' +
+        '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-retry-btn">🔄 다시 판독</button></div>';
+      const b = document.getElementById('ocr-retry-btn');
+      if (b) b.onclick = ()=>{ box.style.display = 'none'; if (ocrLastJob) ocrLastJob(); };
     } else {
-      box.textContent = '판독 중 오류가 발생했습니다: ' + msg;
+      box.innerHTML = '판독을 완료하지 못했습니다: ' + escapeHtml(msg) +
+        '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-retry-btn">🔄 다시 판독</button></div>';
+      const b = document.getElementById('ocr-retry-btn');
+      if (b) b.onclick = ()=>{ box.style.display = 'none'; if (ocrLastJob) ocrLastJob(); };
+    }
+  }
+
+  // ---- 판독 자동 재시도 제어 ----
+  //  · Gemini 서버 혼잡(503 high demand), 요청 한도 초과(429), 네트워크 끊김, 빈 응답, 형식이 깨진 응답은
+  //    오류로 끝내지 않고 모델을 바꿔가며 "판독이 될 때까지" 계속 자동 재시도합니다.
+  //  · 대기 시간은 3초 → 6초 → 12초 … 최대 30초로 늘어나며, 화면의 [판독 중지] 버튼으로 언제든 멈출 수 있습니다.
+  //  · API 키 자체가 막힌 경우(재시도해도 절대 성공할 수 없는 경우)만 즉시 안내합니다.
+  let ocrCancelRequested = false;
+  let ocrLastJob = null;           // [다시 판독] 버튼이 재실행할 작업
+  let geminiNoJsonMime = false;    // 모델이 responseMimeType 을 지원하지 않으면 자동으로 빼고 요청
+  function ocrCancelBtn(show){
+    let btn = document.getElementById('ocr-cancel-btn');
+    if (!btn){
+      const lb = document.getElementById('loading-box'); if (!lb) return;
+      btn = document.createElement('button');
+      btn.id = 'ocr-cancel-btn'; btn.type = 'button'; btn.className = 'btn-mini';
+      btn.textContent = '⏹ 판독 중지';
+      btn.style.cssText = 'display:none; margin:8px 0 0; padding:6px 14px; border-radius:8px; border:1px solid rgba(255,255,255,.25); background:rgba(255,255,255,.08); color:inherit; font-weight:700; cursor:pointer;';
+      btn.onclick = ()=>{ ocrCancelRequested = true; btn.textContent = '중지하는 중...'; btn.disabled = true; };
+      lb.insertAdjacentElement('afterend', btn);
+    }
+    if (show){ btn.style.display = ''; } else { btn.style.display = 'none'; btn.disabled = false; btn.textContent = '⏹ 판독 중지'; }
+  }
+  function ocrCancelError(){ const e = new Error('판독을 중지했습니다.'); e.isCancel = true; return e; }
+  async function waitWithCountdown(ms, render){
+    const end = Date.now() + ms;
+    while (Date.now() < end){
+      if (ocrCancelRequested) throw ocrCancelError();
+      render(Math.ceil((end - Date.now())/1000));
+      await sleep(Math.min(500, end - Date.now()));
     }
   }
 
@@ -3943,83 +3982,98 @@
       inline_data: { mime_type: img.mediaType, data: img.data }
     }));
     parts.push({ text: promptText });
-
-    const body = JSON.stringify({
+    const makeBody = ()=> JSON.stringify({
       contents: [{ role: "user", parts }],
       // temperature/top_p/top_k는 최신 Gemini 3.x 모델에서 지원 중단(deprecated) 예정이라 제외했습니다.
-      generationConfig: { maxOutputTokens: 8192, responseMimeType: 'application/json' }
+      generationConfig: geminiNoJsonMime ? { maxOutputTokens: 8192 } : { maxOutputTokens: 8192, responseMimeType: 'application/json' }
     });
 
-    const maxAttemptsPerModel = 2; // 모델당 재시도 횟수 (총 시도 = 모델 수 × 이 값)
-    let lastErr;
+    const loadingBox = document.getElementById('loading-box');
+    const baseText = loadingBox ? loadingBox.textContent : '';
+    const t0 = Date.now();
+    const dead = new Set();          // 이 키로는 쓸 수 없는 모델(지원 종료 등)
+    let lastErr = null, round = 0, tries = 0;
 
-    for (let m = 0; m < GEMINI_MODEL_CANDIDATES.length; m++){
-      const model = GEMINI_MODEL_CANDIDATES[m];
-      const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(apiKey);
-
-      for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++){
-        let response;
-        try {
-          response = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body
-          });
-        } catch (networkErr){
-          lastErr = networkErr;
-          await sleep(1500 * attempt);
-          continue;
+    try {
+      while (true){
+        if (ocrCancelRequested) throw ocrCancelError();
+        const alive = GEMINI_MODEL_CANDIDATES.filter(m => !dead.has(m));
+        if (!alive.length){
+          // 모든 모델이 "사용 불가" 판정 → 목록을 초기화해 처음부터 다시 시도 (일시적인 400/404 대비)
+          dead.clear();
+          alive.push(...GEMINI_MODEL_CANDIDATES);
         }
-
-        if (!response.ok){
-          let msg = 'HTTP ' + response.status;
+        for (const model of alive){
+          if (ocrCancelRequested) throw ocrCancelError();
+          tries++;
+          const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(apiKey);
+          let response;
           try {
-            const errData = await response.json();
-            if (errData && errData.error && errData.error.message) msg = errData.error.message;
-          } catch(e){}
-
-          const isTransient = response.status === 503 || response.status === 429 ||
-            /overload|high demand|다시 시도/i.test(msg);
-          // API 키 자체가 잘못된 경우는 모델을 바꿔도 소용없으므로 바로 중단합니다.
-          const isFatal = isGeminiKeyError(response.status, msg) || (response.status === 400 && /api key not valid|api_key_invalid/i.test(msg));
-
-          lastErr = new Error(msg);
-
-          if (isFatal){
-            lastErr.isKeyError = true;
-            throw lastErr;
+            response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: makeBody() });
+          } catch (networkErr){
+            lastErr = new Error('네트워크 연결이 불안정합니다 (' + (networkErr.message || networkErr) + ')');
+            continue;
           }
 
-          if (isTransient){
-            const loadingBox = document.getElementById('loading-box');
-            const isLastAttemptForModel = attempt === maxAttemptsPerModel;
-            const hasNextModel = m < GEMINI_MODEL_CANDIDATES.length - 1;
-            if (loadingBox){
-              loadingBox.textContent = isLastAttemptForModel && hasNextModel
-                ? ('현재 모델(' + model + ')이 혼잡하여 예비 모델로 전환합니다...')
-                : ('Gemini 서버가 혼잡합니다. 잠시 후 자동 재시도 중... (' + model + ' ' + attempt + '/' + maxAttemptsPerModel + ')');
+          if (!response.ok){
+            let msg = 'HTTP ' + response.status;
+            try {
+              const errData = await response.json();
+              if (errData && errData.error && errData.error.message) msg = errData.error.message;
+            } catch(e){}
+            lastErr = new Error(msg);
+            // API 키 자체가 막힌 경우는 몇 번을 다시 해도 성공할 수 없으므로 바로 안내합니다.
+            if (isGeminiKeyError(response.status, msg) || (response.status === 400 && /api key not valid|api_key_invalid/i.test(msg))){
+              lastErr.isKeyError = true;
+              throw lastErr;
             }
-            await sleep(2500 * attempt);
-            continue; // 같은 모델로 재시도 (마지막 시도였으면 바깥 루프에서 다음 모델로 넘어감)
+            // responseMimeType 미지원 모델 → 옵션을 빼고 즉시 같은 모델로 다시
+            if (response.status === 400 && /response_?mime_?type|responseMimeType/i.test(msg) && !geminiNoJsonMime){
+              geminiNoJsonMime = true; tries--; 
+              continue;
+            }
+            const isTransient = response.status === 503 || response.status === 429 || response.status === 500 || response.status === 502 || response.status === 504 ||
+              /overload|high demand|unavailable|try again|resource.?exhausted|quota|rate limit|deadline|internal/i.test(msg);
+            if (!isTransient) dead.add(model);   // 지원 종료 등 → 이번 바퀴에서는 이 모델을 건너뜀
+            continue;
           }
 
-          // 혼잡도 아니고 키 오류도 아닌 경우 (예: 모델 지원 종료/변경 등) → 이 모델은 포기하고 다음 모델로
-          const loadingBox = document.getElementById('loading-box');
-          if (loadingBox) loadingBox.textContent = '모델(' + model + ') 사용 불가 - 다음 모델로 전환합니다...';
-          break;
+          let data;
+          try { data = await response.json(); } catch(e){ lastErr = new Error('Gemini 응답을 읽지 못했습니다.'); continue; }
+          const candidate = data.candidates && data.candidates[0];
+          const textOut = candidate ? (candidate.content && candidate.content.parts || []).filter(p=>p.text).map(p=>p.text).join('\n') : '';
+          if (!textOut.trim()){
+            const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
+            lastErr = new Error(blockReason ? ('Gemini가 응답을 거부했습니다: ' + blockReason) : 'Gemini 응답이 비어 있습니다.');
+            continue;
+          }
+          // 판독 결과는 모두 JSON이어야 합니다. 형식이 깨진(잘린) 응답이면 버리고 다시 요청합니다.
+          try { parseJsonLoose(textOut); }
+          catch(e){ lastErr = new Error('응답 형식 오류: ' + e.message); continue; }
+          return textOut;
         }
 
-        const data = await response.json();
-        const candidate = data.candidates && data.candidates[0];
-        if (!candidate) {
-          const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
-          throw new Error(blockReason ? ('Gemini가 응답을 거부했습니다: ' + blockReason) : 'Gemini 응답이 비어 있습니다.');
-        }
-        const textParts = (candidate.content && candidate.content.parts || []).filter(p=>p.text).map(p=>p.text);
-        return textParts.join('\n');
+        // 한 바퀴(모든 모델) 실패 → 점점 길게 기다렸다가 다시 시도 (판독될 때까지 반복)
+        round++;
+        ocrCancelBtn(true);
+        const waitMs = Math.min(30000, 3000 * Math.pow(2, round - 1)) + Math.floor(Math.random() * 1000);
+        const reason = lastErr ? lastErr.message : '';
+        const short = /high demand|overload|503|unavailable/i.test(reason) ? 'Gemini 서버가 혼잡합니다'
+          : /429|quota|rate limit|resource.?exhausted/i.test(reason) ? '요청이 많아 잠시 대기합니다'
+          : /네트워크/.test(reason) ? '네트워크 연결이 불안정합니다'
+          : '응답을 다시 받는 중입니다';
+        await waitWithCountdown(waitMs, sec=>{
+          if (loadingBox){
+            const el = Math.round((Date.now() - t0)/1000);
+            loadingBox.textContent = '⏳ ' + short + '. ' + sec + '초 후 자동으로 다시 판독합니다… (재시도 ' + tries + '회 · 경과 ' + (el >= 60 ? Math.floor(el/60) + '분 ' : '') + (el % 60) + '초)' +
+              (baseText ? '\n' + baseText : '');
+          }
+        });
+        if (loadingBox) loadingBox.textContent = '🔄 다시 판독하는 중... (재시도 ' + tries + '회)' + (baseText ? '\n' + baseText : '');
       }
+    } finally {
+      if (loadingBox && !ocrCancelRequested && round > 0) loadingBox.textContent = baseText;
     }
-    throw lastErr || new Error('모든 모델이 혼잡하여 요청에 실패했습니다. 잠시 후 다시 시도해주세요.');
   }
 
   function repairJsonString(s){
@@ -4375,6 +4429,8 @@ ${rowResultSchema()}`;
   }
 
   async function runOcr(dataUrl){
+    ocrLastJob = ()=> runOcr(dataUrl);
+    ocrCancelRequested = false;
     state.pagesData = [];
     document.getElementById('loading-box').style.display = '';
     document.getElementById('loading-box').textContent = 'Gemini가 표를 읽는 중입니다...';
@@ -4411,10 +4467,14 @@ ${rowResultSchema()}`;
       showOcrError(err);
     } finally {
       document.getElementById('loading-box').style.display = 'none';
+      ocrCancelBtn(false);
+      ocrCancelRequested = false;
     }
   }
 
   async function runOcrMultiPage(pageImages){
+    ocrLastJob = ()=> runOcrMultiPage(pageImages);
+    ocrCancelRequested = false;
     document.getElementById('loading-box').style.display = '';
     document.getElementById('error-box').style.display = 'none';
     document.getElementById('results-table-wrap').innerHTML = '';
@@ -4468,6 +4528,8 @@ ${rowResultSchema()}`;
       showOcrError(err);
     } finally {
       document.getElementById('loading-box').style.display = 'none';
+      ocrCancelBtn(false);
+      ocrCancelRequested = false;
     }
   }
 
