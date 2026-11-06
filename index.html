@@ -216,6 +216,11 @@
         .doc-info span b { color: #fff; font-weight: 800; margin-left: 4px; }
         #loading-box, #error-box { font-size: 0.8rem; padding: 14px; border-radius: 10px; }
         #loading-box { color: var(--neon-blue); background: rgba(0,210,255,0.08); white-space: pre-line; }
+        .ocr-top-actions{ position:sticky; top:0; z-index:30; display:flex; align-items:center; gap:10px; padding:10px 12px; margin:10px 0; border-radius:12px; background:rgba(24,16,40,.94); border:1px solid rgba(236,72,153,.35); box-shadow:0 6px 18px rgba(0,0,0,.35); backdrop-filter:blur(6px); }
+        .ocr-top-actions .ota-info{ flex:1; font-size:0.8rem; font-weight:700; color:#e9d5ff; }
+        .ocr-top-actions .ota-info b{ color:#fff; }
+        .ocr-top-actions .btn-primary{ flex:0 0 auto; padding:9px 18px; }
+        .ocr-top-actions .ota-down{ flex:0 0 auto; background:transparent; border:1px solid rgba(255,255,255,.25); color:#e9d5ff; border-radius:9px; padding:8px 10px; font-size:0.76rem; font-weight:700; cursor:pointer; }
         #error-box { color: #fca5a5; background: rgba(239,68,68,0.12); }
 
         .table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
@@ -1099,6 +1104,21 @@
         /* ===== 입·출고 기록 — 기사별 합계 목록 + 기록일지 양식 수정 ===== */
         #io-delivery-body tr.iog-row{ cursor:pointer; }
         #io-delivery-body tr.iog-row:hover td{ background:#eef4ff !important; }
+        .iog-chk-badge{ display:inline-flex; flex-direction:column; align-items:flex-start; gap:1px; font-size:0.72rem; font-weight:800; padding:4px 8px; border-radius:7px; white-space:nowrap; line-height:1.25; }
+        .iog-chk-badge small{ font-weight:600; font-size:0.66rem; opacity:.85; }
+        .iog-chk-done{ background:#e6f8ee; color:#15803d; border:1px solid #bbf7d0; }
+        .iog-chk-part{ background:#fff7e6; color:#b45309; border:1px solid #fde68a; }
+        .iog-chk-none{ background:#f1f5f9; color:#94a3b8; border:1px solid #e2e8f0; }
+        tr.iog-row.iog-row-done td{ background:#f8fdf9; }
+        .io-sort-th{ cursor:pointer; user-select:none; white-space:nowrap; }
+        .io-sort-th:hover{ color:#3b5bdb; }
+        .io-sort-th .io-sort-ind{ display:inline-block; width:12px; margin-left:3px; font-size:0.68rem; color:#c0c8d6; }
+        .io-sort-th.io-sorted .io-sort-ind{ color:#3b5bdb; }
+        .io-only-unchk{ display:inline-flex; align-items:center; gap:5px; font-size:0.8rem; font-weight:700; color:#475569; height:38px; padding:0 10px; border:1px solid #d5dde8; border-radius:9px; background:#fff; cursor:pointer; white-space:nowrap; }
+        .iog-table td.iog-sel{ background:#dbeafe !important; box-shadow:inset 0 0 0 1px #3b82f6; }
+        .iog-table td.iog-sel input{ background:transparent; }
+        .iog-table.iog-selecting, .iog-table.iog-selecting input{ user-select:none; -webkit-user-select:none; caret-color:transparent; }
+        .iog-sel-hint{ font-size:0.74rem; color:#64748b; }
         .iog-cnt{ font-size:0.7rem; font-weight:700; color:#64748b; background:#f1f5f9; border-radius:6px; padding:1px 6px; margin-left:4px; }
         .iog-btn{ border:none; border-radius:6px; padding:4px 9px; font-size:0.74rem; font-weight:700; cursor:pointer; margin-right:4px; }
         .iog-btn-edit{ background:#eef2ff; color:#3b5bdb; } .iog-btn-ok{ background:#e6f8ee; color:#1a8a52; } .iog-btn-del{ background:#fde3ea; color:#be185d; }
@@ -1967,13 +1987,25 @@
                         </div>
                         <div style="display:flex; gap:8px; flex-wrap:wrap;">
                             <input type="text" id="io-group-search" class="io-group-search" placeholder="센터·일자·기사·차량·거래처 검색">
+                            <label class="io-only-unchk" title="수정 이력이 없는(아직 확인하지 않은) 기사님만 보기"><input type="checkbox" id="io-only-unchecked"> 미확인만</label>
                             <button class="dp-btn-outline" id="io-delivery-excel-btn">Excel 다운로드</button>
                             <button class="dp-btn-primary" id="io-delivery-add-btn" style="padding:0 18px; height:38px;">+ 수기 등록</button>
                         </div>
                     </div>
                     <div class="dp-table-wrap">
                         <table class="dp-table">
-                            <thead><tr><th>센터</th><th>일자</th><th>기사</th><th>차량</th><th>배송 합계</th><th>회수 합계</th><th>미회수</th><th>상태</th><th>관리</th></tr></thead>
+                            <thead><tr id="io-delivery-head">
+                              <th class="io-sort-th" data-sort="center">센터<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="date">일자<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="driver">기사<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="car">차량<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="d">배송 합계<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="r">회수 합계<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="unret">미회수<span class="io-sort-ind"></span></th>
+                              <th class="io-sort-th" data-sort="status">상태<span class="io-sort-ind"></span></th>
+                              <th>관리</th>
+                              <th class="io-sort-th" data-sort="checked" title="수정 화면에서 [저장]을 누른 기사님 (수량을 고치지 않아도 표시)">수정 이력<span class="io-sort-ind"></span></th>
+                            </tr></thead>
                             <tbody id="io-delivery-body"></tbody>
                         </table>
                     </div>
@@ -1995,7 +2027,7 @@
                     </div>
                     <div class="dp-table-wrap">
                         <table class="dp-table">
-                            <thead><tr><th><input type="checkbox" id="io-t-select-all"></th><th>일자</th><th>출고지</th><th>입고지</th><th>기사</th><th>출고</th><th>회수</th><th>파렛트(KPP/아주)</th><th>상태</th><th>관리</th></tr></thead>
+                            <thead><tr id="io-transport-head"><th><input type="checkbox" id="io-t-select-all"></th><th class="io-sort-th" data-sort="date">일자<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="fromName">출고지<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="toName">입고지<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="driver">기사<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="d">출고<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="r">회수<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="pallet">파렛트(KPP/아주)<span class="io-sort-ind"></span></th><th class="io-sort-th" data-sort="status">상태<span class="io-sort-ind"></span></th><th>관리</th></tr></thead>
                             <tbody id="io-transport-body"></tbody>
                         </table>
                     </div>
@@ -2127,6 +2159,8 @@
             </div>
             <div class="iog-tools">
               <button type="button" class="dp-btn-outline" id="iog-add-row">+ 거래처 행 추가</button>
+              <button type="button" class="dp-btn-outline" id="iog-clear-sel" disabled title="드래그로 선택한 범위의 값을 지웁니다 (Delete 키와 같음)">선택 범위 지우기</button>
+              <span class="iog-sel-hint" id="iog-sel-hint">엑셀처럼 마우스로 드래그(또는 Shift+클릭)해서 범위를 선택한 뒤 Delete 키로 한 번에 지울 수 있습니다.</span>
               <span class="iog-summary" id="iog-summary"></span>
             </div>
             <div class="iog-foot">
@@ -2196,6 +2230,11 @@
             </div>
             <div id="loading-box" style="display:none;"></div>
             <div id="error-box" style="display:none;"></div>
+            <div id="ocr-top-actions" class="ocr-top-actions" style="display:none;">
+                <div class="ota-info" id="ocr-top-info"></div>
+                <button type="button" class="ota-down" id="ocr-top-down">맨 아래로 ↓</button>
+                <button type="button" class="btn-primary" id="save-top-btn">☁ 데이터 저장</button>
+            </div>
             <div id="doc-info" class="doc-info"></div>
             <div id="results-table-wrap"></div>
             <div class="panel-actions">
@@ -3488,6 +3527,23 @@
       }
       const heads = [rLines[0]];
       if (!rows.length) return null;
+      // ---- 행 높이 보정: 가로선 하나를 놓치면(손글씨가 선을 덮는 경우 등) 두 행이 한 칸으로 합쳐져
+      //      그 아래 모든 행이 한 칸씩 밀립니다. 기록일지는 행 높이가 일정하므로 중앙값의 1.8배 이상인 칸은
+      //      행 수만큼 균등 분할하고, 지나치게 얇은 칸(선 잔상)은 버립니다.
+      if (rows.length >= 3){
+        const hs = rows.map(r => r.y1 - r.y0).sort((a, b) => a - b);
+        const medH = hs[Math.floor(hs.length / 2)];
+        const fixed = [];
+        rows.forEach(r => {
+          const h = r.y1 - r.y0;
+          if (h < medH * 0.55) return;
+          const k = Math.round(h / medH);
+          if (h > medH * 1.8 && k >= 2 && k <= 6){
+            for (let q = 0; q < k; q++) fixed.push({ y0: r.y0 + h * q / k, y1: r.y0 + h * (q + 1) / k, split: true });
+          } else fixed.push(r);
+        });
+        rows.length = 0; fixed.forEach(r => rows.push(r));
+      }
       const leftLines = vLines.map(g => g.center).filter(x => x < dB[0] - colW * 0.6).sort((a, b) => b - a);
       let custX0 = leftLines.length >= 2 ? leftLines[1] : (leftLines.length ? leftLines[0] - colW * 1.4 : dB[0] - colW * 5.2);
       if (dB[0] - custX0 > colW * 7.5 || dB[0] - custX0 < colW * 2.5) custX0 = dB[0] - colW * 5.2;
@@ -3750,27 +3806,45 @@
       const parsed = parseJsonLoose(text);
       const list = Array.isArray(parsed.rows) ? parsed.rows : [];
       part.forEach((gi, j)=>{
-        const hit = list.find(x => Number(x.row) === j + 1) || list[j];
+        // 행 번호로만 짝짓기. 번호 없이 정확히 같은 개수로 왔을 때만 순서를 사용 (빠진 행 때문에 밀리는 것 방지)
+        const numbered = list.some(x => x && x.row != null);
+        const hit = numbered ? list.find(x => Number(x.row) === j + 1) : (list.length === part.length ? list[j] : null);
         sheetVals[gi] = hit ? { cn: hit.customer_number, name: hit.customer_name, delivery: sheetRowToObj(hit.delivery), return: sheetRowToObj(hit.return), uncertain: hit.uncertain || [] } : null;
       });
     }
     const allNull = sv => ['delivery','return'].every(sec => QTY_KEYS.every(k => sv[sec][k] === null));
-    // 고객번호로 1차 결과와 짝짓기 (못 찾으면 같은 순서의 행을 사용)
+    // 고객번호로 1차 결과와 짝짓기.
+    //  · 1단계: 번호가 같은(또는 1글자 차이) 행끼리 짝짓기
+    //  · 2단계: 번호를 못 읽은 칸 행은, 1단계에서 확인된 "칸 행 ↔ 1차 행" 간격(오프셋)을 적용해 짝짓기
+    //    (예전에는 무조건 같은 순번끼리 붙여서, 표 위쪽에 행이 하나 더 잡히면 그 장 전체가 한 칸씩 밀렸습니다)
     const usedA = new Set();
-    const pairs = [];
+    const pairMap = {};
+    const cand = [];
     grid.rows.forEach((gr, gi)=>{
       const sv = sheetVals[gi];
       if (!sv) return;
       const key = normCust(sv.cn);
-      let ai = key ? rows.findIndex((r, i)=> !usedA.has(i) && normCust(r.customer_number) === key) : -1;
-      if (ai < 0 && !key && allNull(sv)) return;   // 인쇄 글자도 숫자도 없는 빈 행
-      if (ai < 0 && key){
-        // 번호 한두 글자 오독 대비: 가장 비슷한 번호 (자리수 같고 1글자 차이)
+      if (!key && allNull(sv)) return;   // 인쇄 글자도 숫자도 없는 빈 행
+      cand.push(gi);
+      if (!key) return;
+      let ai = rows.findIndex((r, i)=> !usedA.has(i) && normCust(r.customer_number) === key);
+      if (ai < 0){
         ai = rows.findIndex((r, i)=>{ const b = normCust(r.customer_number); if (usedA.has(i) || b.length !== key.length) return false; let d = 0; for (let q = 0; q < b.length; q++) if (b[q] !== key[q]) d++; return d <= 1; });
       }
-      if (ai < 0 && !key && gi < rows.length && !usedA.has(gi)) ai = gi;
-      if (ai >= 0) usedA.add(ai);
-      pairs.push({ gi, ai, sv });
+      if (ai >= 0){ usedA.add(ai); pairMap[gi] = ai; }
+    });
+    const offs = Object.keys(pairMap).map(gi => pairMap[gi] - Number(gi)).sort((a, b) => a - b);
+    const offset = offs.length ? offs[Math.floor(offs.length / 2)] : 0;
+    const pairs = [];
+    cand.forEach(gi => {
+      let ai = pairMap[gi] != null ? pairMap[gi] : -1;
+      if (ai < 0){
+        const sv = sheetVals[gi];
+        const tgt = gi + offset;
+        // 번호를 못 읽은 칸 행 → 오프셋 위치의 1차 행이 아직 짝이 없으면 연결 (번호를 읽었는데 못 찾은 행은 새 행으로 추가)
+        if (!normCust(sv.cn) && tgt >= 0 && tgt < rows.length && !usedA.has(tgt)){ ai = tgt; usedA.add(ai); }
+      }
+      pairs.push({ gi, ai, sv: sheetVals[gi] });
     });
     if (!pairs.length) return { rows, used: false };
     // ---- 3차: 잉크가 있는 칸만 숫자 하나씩 잘라 위치 정보 없이 숫자 모양만 읽기 ----
@@ -3852,6 +3926,33 @@
     rows.forEach((r, i)=>{ if (!usedA.has(i)) out.push({ ...r, confidence: Math.min(r.confidence ?? 0.5, 0.5), uncertain_fields: Array.from(new Set([...(r.uncertain_fields || []), 'customer_number'])) }); });
     return { rows: out, used: true, grid };
   }
+
+  // ---- OCR 결과 상단 저장 바: 기사님이 많아도 스크롤 없이 바로 저장 ----
+  (function(){
+    const bar = document.getElementById('ocr-top-actions');
+    const wrap = document.getElementById('results-table-wrap');
+    if (!bar || !wrap) return;
+    const sync = ()=>{
+      const n = (state.rows || []).length;
+      const has = n > 0 && wrap.innerHTML.trim() !== '';
+      bar.style.display = has ? 'flex' : 'none';
+      // 상단 고정 헤더 바로 아래에 붙도록 위치 계산
+      if (has){
+        let top = 0;
+        document.querySelectorAll('header, .header, .app-header').forEach(h=>{ const cs = getComputedStyle(h); if ((cs.position === 'sticky' || cs.position === 'fixed') && h.offsetParent !== null) top = Math.max(top, h.getBoundingClientRect().height); });
+        bar.style.top = (top ? top + 6 : 0) + 'px';
+        bar.style.zIndex = 60;
+      }
+      if (has){
+        const drivers = new Set((state.rows || []).map(r=> (r.docInfo && r.docInfo.driver_name) || (state.document && state.document.driver_name) || '')).size;
+        const pages = (state.pagesData || []).length;
+        document.getElementById('ocr-top-info').innerHTML = '판독 결과 <b>' + n + '건</b>' + (pages > 1 ? ' · ' + pages + '장' : '') + (drivers > 1 ? ' · 기사 ' + drivers + '명' : '') + ' — 확인 후 바로 저장할 수 있습니다';
+      }
+    };
+    new MutationObserver(sync).observe(wrap, { childList: true });
+    document.getElementById('save-top-btn').addEventListener('click', ()=> document.getElementById('save-to-cloud-btn').click());
+    document.getElementById('ocr-top-down').addEventListener('click', ()=> document.getElementById('save-to-cloud-btn').scrollIntoView({ behavior: 'smooth', block: 'center' }));
+  })();
 
   // 개발·점검용: 브라우저 콘솔에서 격자 인식 결과를 확인할 수 있습니다.
   window.__pboxOcrDebug = { autoCropPage, rectifyByTableLines, detectTableGrid, buildCellSheet, analyzeInk, buildDigitSheet };
@@ -5586,6 +5687,34 @@ ${rowResultSchema()}`;
   let iogEditing = null;   // { key, center, date, driver, car, items:[원본 기록] }
   let iogQuery = '';
   function iogKeyOf(it){ return [it.center || '-', normalizeDateStr(it.date) || String(it.date || '-'), it.driver || '-', it.car || '-'].join('|'); }
+  // ---- 수정 이력(확인 이력) ----
+  //  · 수정 화면에서 [저장]을 누르면 수량을 고치지 않았어도 그 기사님 기록 전체에 "수정 완료" 이력을 남깁니다.
+  //  · 구글 시트 PBOX_배송 의 "확인일시/확인자" 열에 저장되며(Code.gs 의 markChecked),
+  //    시트 스크립트가 아직 갱신되지 않았으면 이 브라우저에 임시로 기록합니다.
+  const IOG_CHECK_LOCAL = 'pbox_iog_checked_local';
+  function iogLocalChecks(){ try { return JSON.parse(localStorage.getItem(IOG_CHECK_LOCAL) || '{}'); } catch(e){ return {}; } }
+  function iogSaveLocalChecks(ids, at, by){
+    const m = iogLocalChecks();
+    ids.forEach(id=>{ m[String(id)] = { at, by }; });
+    try { localStorage.setItem(IOG_CHECK_LOCAL, JSON.stringify(m)); } catch(e){}
+  }
+  function iogCheckOf(it){
+    if (it.checkedAt) return { at: String(it.checkedAt), by: it.checkedBy || '' };
+    const l = iogLocalChecks()[String(it.id)];
+    return l || null;
+  }
+  function iogNowStr(){
+    const d = new Date(), z = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + z(d.getMonth()+1) + '-' + z(d.getDate()) + ' ' + z(d.getHours()) + ':' + z(d.getMinutes()) + ':' + z(d.getSeconds());
+  }
+  function iogShortTime(at){
+    const m = /(\d{4})[-.](\d{1,2})[-.](\d{1,2})[ T]?(\d{1,2})?:?(\d{2})?/.exec(String(at || ''));
+    if (!m) return String(at || '');
+    return m[2].padStart(2,'0') + '.' + m[3].padStart(2,'0') + (m[4] ? ' ' + m[4].padStart(2,'0') + ':' + (m[5] || '00') : '');
+  }
+  let iogSort = { key: 'date', dir: -1 };
+  let iogOnlyUnchecked = false;
+
   function iogBuildGroups(){
     const map = {};
     const fc = iofCenter();
@@ -5595,7 +5724,12 @@ ${rowResultSchema()}`;
       g.items.push(it);
       const t = itemTotals(it); g.d += t.d; g.r += t.r;
     });
-    return Object.values(map).map(g => Object.assign(g, { sent: g.items.filter(i=> i.sent).length }))
+    return Object.values(map).map(g => {
+        const checks = g.items.map(iogCheckOf).filter(Boolean);
+        const lastAt = checks.map(c=> c.at).sort().pop() || '';
+        const lastBy = (checks.find(c=> c.at === lastAt) || {}).by || '';
+        return Object.assign(g, { sent: g.items.filter(i=> i.sent).length, checked: checks.length, checkedAt: lastAt, checkedBy: lastBy });
+      })
       .sort((a, b)=> String(b.date).localeCompare(String(a.date)) || String(a.center).localeCompare(String(b.center), 'ko') || String(a.driver).localeCompare(String(b.driver), 'ko'));
   }
 
@@ -5604,11 +5738,28 @@ ${rowResultSchema()}`;
     iogGroups = iogBuildGroups();
     const q = iogQuery.trim().toLowerCase();
     let list = q ? iogGroups.filter(g=> [g.center, g.date, g.driver, g.car].concat(g.items.map(i=> i.custName || '')).some(x=> String(x).toLowerCase().includes(q))) : iogGroups;
+    const doneCnt = list.filter(g=> g.checked > 0).length;
+    if (iogOnlyUnchecked) list = list.filter(g=> !g.checked);
+    // 정렬
+    const sv = (g, k)=>{
+      switch (k){
+        case 'd': return g.d; case 'r': return g.r; case 'unret': return Math.max(0, g.d - g.r);
+        case 'status': return g.sent === g.items.length ? 1 : 0;
+        case 'checked': return (g.checked ? 1 : 0) * 1e15 + (Number(String(g.checkedAt).replace(/\D/g,'').slice(0,14)) || 0);
+        default: return String(g[k] == null ? '' : g[k]);
+      }
+    };
+    list = list.slice().sort((a, b)=>{
+      const x = sv(a, iogSort.key), y = sv(b, iogSort.key);
+      const c = (typeof x === 'number' && typeof y === 'number') ? x - y : String(x).localeCompare(String(y), 'ko', { numeric: true });
+      return c * iogSort.dir || String(b.date).localeCompare(String(a.date)) || String(a.driver).localeCompare(String(b.driver), 'ko');
+    });
+    ioPaintSortHead('io-delivery-head', iogSort);
     const cnt = document.getElementById('io-group-count');
-    if (cnt) cnt.textContent = '기사 ' + list.length + '건 · 거래처 기록 ' + list.reduce((a, g)=> a + g.items.length, 0) + '건';
-    list = list.slice(0, 120);
+    if (cnt) cnt.innerHTML = '기사 ' + list.length + '건 · 거래처 기록 ' + list.reduce((a, g)=> a + g.items.length, 0) + '건 · <span style="color:#15803d;">수정 완료 ' + doneCnt + '</span> / ' + (q ? iogGroups.filter(g=> [g.center, g.date, g.driver, g.car].concat(g.items.map(i=> i.custName || '')).some(x=> String(x).toLowerCase().includes(q))).length : iogGroups.length) + '명';
+    list = list.slice(0, 200);
     if (!list.length){
-      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#94a3b8; padding:16px;">' + (q ? '검색 결과가 없습니다.' : '선택한 기간·센터에 저장된 기록이 없습니다. 위에서 조회 기간을 바꿔 보세요.') + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:#94a3b8; padding:16px;">' + (q ? '검색 결과가 없습니다.' : iogOnlyUnchecked ? '수정 이력이 없는(미확인) 기사님이 없습니다. 모두 확인했습니다 👍' : '선택한 기간·센터에 저장된 기록이 없습니다. 위에서 조회 기간을 바꿔 보세요.') + '</td></tr>';
       return;
     }
     tbody.innerHTML = list.map(g=>{
@@ -5616,7 +5767,12 @@ ${rowResultSchema()}`;
       const allSent = g.sent === g.items.length;
       const st = allSent ? '<span class="dp-status-ok">검증완료</span>'
         : '<span class="dp-status-pending">검증대기 ' + (g.items.length - g.sent) + '건</span>';
-      return '<tr class="iog-row" data-iog="' + escapeHtml(g.key) + '" title="눌러서 이 기사님의 거래처별 수량을 기록일지 양식으로 수정">' +
+      // 거래처 일부만 저장했어도(일부만 수정이 필요했던 경우) "수정 완료"로 동일하게 표시합니다.
+      const allChk = g.checked > 0;
+      const chk = allChk
+        ? '<span class="iog-chk-badge iog-chk-done" title="' + escapeHtml(g.checkedAt + (g.checkedBy ? ' · ' + g.checkedBy : '')) + '">✔ 수정 완료<small>' + escapeHtml(iogShortTime(g.checkedAt)) + (g.checkedBy ? ' · ' + escapeHtml(g.checkedBy) : '') + '</small></span>'
+        : '<span class="iog-chk-badge iog-chk-none">미확인</span>';
+      return '<tr class="iog-row' + (allChk ? ' iog-row-done' : '') + '" data-iog="' + escapeHtml(g.key) + '" title="눌러서 이 기사님의 거래처별 수량을 기록일지 양식으로 수정">' +
         '<td>' + escapeHtml(g.center) + '</td>' +
         '<td>' + escapeHtml(g.date) + '</td>' +
         '<td><b>' + escapeHtml(g.driver) + '</b> <span class="iog-cnt">' + g.items.length + '곳</span></td>' +
@@ -5629,7 +5785,8 @@ ${rowResultSchema()}`;
           '<button data-iog-edit="' + escapeHtml(g.key) + '" class="iog-btn iog-btn-edit">수정</button>' +
           (allSent ? '' : '<button data-iog-verify="' + escapeHtml(g.key) + '" class="iog-btn iog-btn-ok">검증완료</button>') +
           '<button data-iog-delete="' + escapeHtml(g.key) + '" class="iog-btn iog-btn-del">삭제</button>' +
-        '</td></tr>';
+        '</td>' +
+        '<td>' + chk + '</td></tr>';
     }).join('');
   }
 
@@ -5641,6 +5798,23 @@ ${rowResultSchema()}`;
     if (ver){ e.stopPropagation(); return iogVerifyGroup(ver.dataset.iogVerify); }
     if (row) iogOpen(row.dataset.iog);
   });
+  // ---- 표 머리글 클릭 → 오름차순/내림차순 정렬 ----
+  function ioPaintSortHead(headId, st){
+    document.querySelectorAll('#' + headId + ' .io-sort-th').forEach(th=>{
+      const on = th.dataset.sort === st.key;
+      th.classList.toggle('io-sorted', on);
+      const ind = th.querySelector('.io-sort-ind');
+      if (ind) ind.textContent = on ? (st.dir > 0 ? '▲' : '▼') : '↕';
+    });
+  }
+  document.getElementById('io-delivery-head').addEventListener('click', e=>{
+    const th = e.target.closest('.io-sort-th'); if (!th) return;
+    const k = th.dataset.sort;
+    iogSort = iogSort.key === k ? { key: k, dir: -iogSort.dir } : { key: k, dir: (k === 'date' || k === 'd' || k === 'r' || k === 'unret' || k === 'checked') ? -1 : 1 };
+    renderIoDeliveryList();
+  });
+  const iogOnlyEl = document.getElementById('io-only-unchecked');
+  if (iogOnlyEl) iogOnlyEl.addEventListener('change', ()=>{ iogOnlyUnchecked = iogOnlyEl.checked; renderIoDeliveryList(); });
   const iogSearch = document.getElementById('io-group-search');
   if (iogSearch) iogSearch.addEventListener('input', e=>{ iogQuery = e.target.value; renderIoDeliveryList(); });
 
@@ -5697,7 +5871,7 @@ ${rowResultSchema()}`;
     iogUpdateTotals();
     document.getElementById('iog-overlay').style.display = 'flex';
   }
-  function iogClose(){ document.getElementById('iog-overlay').style.display = 'none'; iogEditing = null; }
+  function iogClose(){ document.getElementById('iog-overlay').style.display = 'none'; iogEditing = null; if (typeof iogClearSel === 'function') iogClearSel(); }
   function iogReadRows(){
     return Array.from(document.querySelectorAll('#iog-body tr')).map(tr=>{
       const o = { id: tr.dataset.id || null };
@@ -5737,6 +5911,66 @@ ${rowResultSchema()}`;
     const hit = pboxDataList.find(i=> i.custName === e.target.value.trim() && i.custCode && i.custCode !== '-');
     if (hit) code.value = hit.custCode;
   });
+  // ---- 엑셀처럼 드래그로 범위 선택 → Delete 키(또는 [선택 범위 지우기])로 한 번에 지우기 ----
+  let iogSel = null, iogDragging = false;
+  const iogTbody = document.getElementById('iog-body');
+  function iogCellsOfRow(tr){ return Array.from(tr.children).filter(td=> td.querySelector('[data-f]')); }
+  function iogPos(td){
+    const tr = td.closest('tr'); if (!tr || tr.parentElement !== iogTbody) return null;
+    const c = iogCellsOfRow(tr).indexOf(td); if (c < 0) return null;
+    return { r: Array.from(iogTbody.children).indexOf(tr), c };
+  }
+  function iogSelSize(){ if (!iogSel) return 0; return (Math.abs(iogSel.b.r - iogSel.a.r) + 1) * (Math.abs(iogSel.b.c - iogSel.a.c) + 1); }
+  function iogSelCells(){
+    if (!iogSel) return [];
+    const r0 = Math.min(iogSel.a.r, iogSel.b.r), r1 = Math.max(iogSel.a.r, iogSel.b.r);
+    const c0 = Math.min(iogSel.a.c, iogSel.b.c), c1 = Math.max(iogSel.a.c, iogSel.b.c);
+    const out = [];
+    Array.from(iogTbody.children).forEach((tr, r)=>{ if (r < r0 || r > r1) return; iogCellsOfRow(tr).forEach((td, c)=>{ if (c >= c0 && c <= c1) out.push(td); }); });
+    return out;
+  }
+  function iogPaintSel(){
+    iogTbody.querySelectorAll('td.iog-sel').forEach(td=> td.classList.remove('iog-sel'));
+    const n = iogSelSize();
+    if (n > 1) iogSelCells().forEach(td=> td.classList.add('iog-sel'));
+    const btn = document.getElementById('iog-clear-sel');
+    if (btn){ btn.disabled = n < 2; btn.textContent = n > 1 ? '선택 범위 지우기 (' + n + '칸)' : '선택 범위 지우기'; }
+  }
+  function iogClearSel(){ iogSel = null; iogPaintSel(); document.querySelector('.iog-table').classList.remove('iog-selecting'); }
+  function iogDeleteSelected(){
+    const cells = iogSelCells(); if (cells.length < 2) return false;
+    cells.forEach(td=>{ const inp = td.querySelector('[data-f]'); if (inp) inp.value = ''; });
+    iogUpdateTotals();
+    return true;
+  }
+  iogTbody.addEventListener('mousedown', e=>{
+    if (e.button !== 0) return;
+    const td = e.target.closest('td'); const pos = td && iogPos(td);
+    if (!pos){ iogClearSel(); return; }
+    if (e.shiftKey && iogSel){ iogSel.b = pos; e.preventDefault(); iogPaintSel(); return; }
+    iogSel = { a: pos, b: pos }; iogDragging = true; iogPaintSel();
+  });
+  iogTbody.addEventListener('mouseover', e=>{
+    if (!iogDragging || !iogSel) return;
+    const td = e.target.closest('td'); const pos = td && iogPos(td); if (!pos) return;
+    if (pos.r === iogSel.b.r && pos.c === iogSel.b.c) return;
+    iogSel.b = pos;
+    if (iogSelSize() > 1){
+      document.querySelector('.iog-table').classList.add('iog-selecting');
+      if (document.activeElement && iogTbody.contains(document.activeElement)) document.activeElement.blur();
+      try { window.getSelection().removeAllRanges(); } catch(_){}
+    }
+    iogPaintSel();
+  });
+  document.addEventListener('mouseup', ()=>{ if (iogDragging){ iogDragging = false; document.querySelector('.iog-table').classList.remove('iog-selecting'); } });
+  document.addEventListener('keydown', e=>{
+    const ov = document.getElementById('iog-overlay');
+    if (!ov || ov.style.display === 'none' || !iogEditing) return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && iogSelSize() > 1){ e.preventDefault(); iogDeleteSelected(); }
+    else if (e.key === 'Escape' && iogSelSize() > 1){ e.preventDefault(); iogClearSel(); }
+  });
+  document.getElementById('iog-clear-sel').addEventListener('click', ()=>{ iogDeleteSelected(); });
+
   document.getElementById('iog-cancel').addEventListener('click', iogClose);
   document.getElementById('iog-close').addEventListener('click', iogClose);
   document.getElementById('iog-save').addEventListener('click', async ()=>{
@@ -5748,8 +5982,11 @@ ${rowResultSchema()}`;
     const rows = iogReadRows();
     const bad = rows.find(r=> !r.custName && !r.custCode && IOG_KEYS.some(k=> r['d_' + k] || r['r_' + k]));
     if (bad){ alert('수량이 입력된 행에 고객명(또는 고객코드)을 입력해주세요.'); return; }
-    const toUpdate = [], toCreate = [], toMark = [];
+    const toUpdate = [], toCreate = [], toMark = [], keepIds = [];
     rows.forEach(r=>{
+      // 기존 행을 드래그로 통째로 지운 경우(고객·수량 모두 비움) → 그 행 삭제
+      if (r.id && !r.custName && !r.custCode && IOG_KEYS.every(k=> !r['d_' + k] && !r['r_' + k])){ iogEditing.removed.push(r.id); return; }
+      if (r.id) keepIds.push(r.id);
       const rec = Object.assign({}, head, { custCode: r.custCode || '-', custName: r.custName || '-' });
       IOG_KEYS.forEach(k=>{ rec['d_' + k] = r['d_' + k] || 0; rec['r_' + k] = r['r_' + k] || 0; });
       if (r.id){
@@ -5762,19 +5999,32 @@ ${rowResultSchema()}`;
         toCreate.push(Object.assign({ id: genId(), sent: verify }, rec));
       }
     });
-    const removed = iogEditing.removed.slice();
-    if (!toUpdate.length && !toCreate.length && !toMark.length && !removed.length){ iogClose(); return; }
-    showLoader('☁ 수정 내용 저장 중... (수정 ' + toUpdate.length + ' · 추가 ' + toCreate.length + ' · 삭제 ' + removed.length + ')');
+    const removed = Array.from(new Set(iogEditing.removed));
+    const checkIds = keepIds.filter(id=> !removed.includes(id)).concat(toCreate.map(c=> c.id));
+    showLoader('☁ 저장 중... (수정 ' + toUpdate.length + ' · 추가 ' + toCreate.length + ' · 삭제 ' + removed.length + ' · 수정 이력 ' + checkIds.length + '곳)');
     try {
       for (const p of toUpdate){ const r = await callScript(p); if (!r || r.result !== 'success') throw new Error((r && r.message) || '수정 실패'); }
       if (toCreate.length){ const r = await callScript({ action: 'createBatch', items: toCreate }); if (!r || r.result !== 'success') throw new Error((r && r.message) || '추가 실패'); }
       for (const id of removed){ const r = await callScript({ action: 'delete', id }); if (!r || r.result !== 'success') throw new Error((r && r.message) || '삭제 실패'); }
       if (toMark.length){ const r = await callScript({ action: 'markSent', ids: toMark }); if (!r || r.result !== 'success') throw new Error((r && r.message) || '검증완료 처리 실패'); }
+      // 수정 이력 기록 (수량을 고치지 않아도 [저장]을 눌렀으면 기록)
+      let checkNote = '';
+      if (checkIds.length){
+        const at = iogNowStr(), by = currentUser ? (currentUser.center || '') : '';
+        iogSaveLocalChecks(checkIds, at, by);
+        try {
+          const r = await callScript({ action: 'markChecked', ids: checkIds, user: by });
+          if (!r || r.result !== 'success'){
+            if (r && /알 수 없는 요청|markChecked/.test(r.message || '')) checkNote = '\n\n※ 수정 이력은 이 PC에만 임시 저장되었습니다. 구글 시트에 남기려면 새 Code.gs 를 Apps Script에 붙여넣고 "새 버전"으로 배포해주세요.';
+            else checkNote = '\n\n※ 수정 이력을 시트에 기록하지 못해 이 PC에만 저장했습니다: ' + ((r && r.message) || '');
+          }
+        } catch(e){ checkNote = '\n\n※ 수정 이력을 시트에 기록하지 못해 이 PC에만 저장했습니다.'; }
+      }
       iogClose();
       await fetchCloudData();
       renderIoDeliveryList();
       if (dashboardOpen) renderDashboard();
-      alert('저장되었습니다.' + (verify ? ' 대시보드 실적에 반영됩니다.' : ' (검증대기 기록은 대시보드 실적에 반영되지 않습니다)'));
+      alert('저장되었습니다.' + (verify ? ' 대시보드 실적에 반영됩니다.' : ' (검증대기 기록은 대시보드 실적에 반영되지 않습니다)') + (toUpdate.length || toCreate.length || removed.length ? '' : '\n(수량 변경 없음 · 수정 이력만 기록)') + checkNote);
     } catch(err){
       alert('저장 실패: ' + (err && err.message ? err.message : err) + '\n일부만 저장되었을 수 있으니 목록을 새로고침해 확인해주세요.');
     } finally { hideLoader(); }
@@ -5973,6 +6223,13 @@ ${rowResultSchema()}`;
     } finally { hideLoader(); }
   }
 
+  let ioTSort = { key: 'date', dir: -1 };
+  document.getElementById('io-transport-head').addEventListener('click', e=>{
+    const th = e.target.closest('.io-sort-th'); if (!th) return;
+    const k = th.dataset.sort;
+    ioTSort = ioTSort.key === k ? { key: k, dir: -ioTSort.dir } : { key: k, dir: (k === 'date' || k === 'd' || k === 'r' || k === 'pallet') ? -1 : 1 };
+    renderIoTransportList();
+  });
   function renderIoTransportList(){
     const tbody = document.getElementById('io-transport-body');
     let list = loadTransportRecords().slice();
@@ -5983,7 +6240,24 @@ ${rowResultSchema()}`;
     }
     const tfc = iofCenter();
     list = list.filter(r=> iofDateIn(r.date) && (!tfc || r.fromName === tfc || r.toName === tfc));
-    list = list.map((r,i)=> [r,i]).sort((a,b)=> String(a[0].date||'').localeCompare(String(b[0].date||'')) || (a[1]-b[1])).reverse().map(x=> x[0]);
+    {
+      const tv = (r, k)=>{
+        const t = transportTotals(r);
+        switch (k){
+          case 'd': return t.d; case 'r': return t.r;
+          case 'pallet': return (Number(r.pallet_kpp)||0) + (Number(r.pallet_aju)||0);
+          case 'status': return r.confirmed ? 1 : 0;
+          case 'date': return normalizeDateStr(r.date) || String(r.date || '');
+          default: return String(r[k] == null ? '' : r[k]);
+        }
+      };
+      list = list.map((r,i)=> [r,i]).sort((a,b)=>{
+        const x = tv(a[0], ioTSort.key), y = tv(b[0], ioTSort.key);
+        const c = (typeof x === 'number' && typeof y === 'number') ? x - y : String(x).localeCompare(String(y), 'ko', { numeric: true });
+        return c * ioTSort.dir || (b[1] - a[1]);
+      }).map(x=> x[0]);
+      ioPaintSortHead('io-transport-head', ioTSort);
+    }
     if (!list.length){
       tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:#94a3b8; padding:16px;">선택한 기간·센터에 저장된 수송 기록이 없습니다.</td></tr>';
       return;
