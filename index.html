@@ -3744,7 +3744,9 @@
       const part = all.slice(s0, s0 + CHUNK);
       if (onProgress) onProgress('칸 단위로 숫자를 읽는 중... (' + Math.min(s0 + CHUNK, all.length) + '/' + all.length + '행)');
       const sheet = buildCellSheet(canvas, grid, part);
-      const text = await callClaude([imageFromDataUrl(sheet.toDataURL('image/png'))], cellSheetPrompt(part.length));
+      let text;
+      try { text = await callClaude([imageFromDataUrl(sheet.toDataURL('image/png'))], cellSheetPrompt(part.length), { essential: false }); }
+      catch(e){ if (e.isCancel || e.isQuota || e.isKeyError) throw e; return { rows, used: false, skipped: true }; }
       const parsed = parseJsonLoose(text);
       const list = Array.isArray(parsed.rows) ? parsed.rows : [];
       part.forEach((gi, j)=>{
@@ -3784,7 +3786,7 @@
         if (onProgress) onProgress('숫자 모양만 따로 한 번 더 읽는 중... (' + Math.min(s0 + DCH, items.length) + '/' + items.length + '칸)');
         try {
           const sheet = buildDigitSheet(canvas, part);
-          const t = await callClaude([imageFromDataUrl(sheet.toDataURL('image/png'))], digitSheetPrompt(part.length));
+          const t = await callClaude([imageFromDataUrl(sheet.toDataURL('image/png'))], digitSheetPrompt(part.length), { essential: false });
           const p = parseJsonLoose(t);
           const list = Array.isArray(p.items) ? p.items : [];
           part.forEach((it, j)=>{
@@ -3795,7 +3797,7 @@
             if (v !== null){ const n = Number(String(v).replace(/[^0-9]/g, '')); v = (String(v).replace(/[^0-9]/g, '') === '' || isNaN(n)) ? null : n; }
             digitVals[it.key] = { value: v, sure: h.sure !== false };
           });
-        } catch(e){ console.warn('숫자 조각 판독 실패', e); }
+        } catch(e){ if (e.isCancel || e.isQuota || e.isKeyError) throw e; console.warn('숫자 조각 판독 생략', e.message); if (geminiLimited) break; }
       }
     }
     const out = [];
@@ -3929,6 +3931,19 @@
         '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-key-fix-btn">🔑 새 API 키 입력</button></div>';
       const b = document.getElementById('ocr-key-fix-btn');
       if (b) b.onclick = ()=>{ if (promptGeminiKey()) box.style.display = 'none'; };
+    } else if (err && (err.isCancel || err.isQuota || err.isRetryExhausted) && err.partial){
+      const p = err.partial;
+      box.innerHTML = '<b>' + p.total + '장 중 ' + p.done + '장까지 판독을 마쳤고, 결과는 아래 표에 들어 있습니다.</b><br>' +
+        escapeHtml(err.isCancel ? '판독을 중지했습니다.' : msg) +
+        '<br><span style="opacity:.85;">지금 결과만 먼저 저장해도 되고, 남은 ' + (p.total - p.done) + '장은 [이어서 판독]으로 ' + (p.done + 1) + '번째 장부터 계속 진행할 수 있습니다.</span>' +
+        '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-retry-btn">▶ 이어서 판독 (' + (p.done + 1) + '/' + p.total + '장부터)</button></div>';
+      const b = document.getElementById('ocr-retry-btn');
+      if (b) b.onclick = ()=>{ box.style.display = 'none'; if (ocrLastJob) ocrLastJob(); };
+    } else if (err && err.isQuota){
+      box.innerHTML = '<b>오늘 Gemini 판독 사용량을 모두 썼습니다.</b><br>' + escapeHtml(msg) +
+        '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-key-fix-btn">🔑 다른 API 키 입력</button></div>';
+      const b = document.getElementById('ocr-key-fix-btn');
+      if (b) b.onclick = ()=>{ if (promptGeminiKey()){ try { localStorage.removeItem(GEMINI_DAILY_KEY); } catch(e){} box.style.display = 'none'; } };
     } else if (err && err.isCancel){
       box.innerHTML = '판독을 중지했습니다. 다시 판독하려면 아래 버튼을 눌러주세요.' +
         '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-retry-btn">🔄 다시 판독</button></div>';
@@ -3948,6 +3963,54 @@
   //  · 대기 시간은 3초 → 6초 → 12초 … 최대 30초로 늘어나며, 화면의 [판독 중지] 버튼으로 언제든 멈출 수 있습니다.
   //  · API 키 자체가 막힌 경우(재시도해도 절대 성공할 수 없는 경우)만 즉시 안내합니다.
   let ocrCancelRequested = false;
+  // 재시도 한도: 핵심 판독(페이지 1차 판독)은 연속 실패 5분까지, 보조 판독(칸·숫자 재대조)은 짧게만 재시도하고 건너뜁니다.
+  const GEMINI_ESSENTIAL_MAX_MS = 5 * 60 * 1000;
+  const GEMINI_SUPPORT_MAX_ROUNDS = 2;
+  let geminiLimited = false;       // 이번 판독 작업에서 한도/혼잡으로 보조 판독을 건너뛰기 시작했는지
+  let geminiMinGapMs = 0;          // 분당 한도(429)를 만나면 요청 간격을 벌려 다시 막히지 않게 합니다
+  let geminiLastCallAt = 0;
+  // 하루 사용량이 끝난 모델 기록 (Gemini 일일 한도는 미국 태평양 시간 자정에 초기화됩니다)
+  const GEMINI_DAILY_KEY = 'pbox_gemini_daily_exhausted';
+  function pacificDay(){ try { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }); } catch(e){ return new Date().toISOString().slice(0,10); } }
+  function dailyExhaustedSet(){
+    try {
+      const o = JSON.parse(localStorage.getItem(GEMINI_DAILY_KEY) || '{}');
+      return new Set(o.day === pacificDay() ? (o.models || []) : []);
+    } catch(e){ return new Set(); }
+  }
+  function markDailyExhausted(model){
+    const set = dailyExhaustedSet(); set.add(model);
+    try { localStorage.setItem(GEMINI_DAILY_KEY, JSON.stringify({ day: pacificDay(), models: Array.from(set) })); } catch(e){}
+  }
+  function quotaResetLocalText(){
+    // 다음 태평양 시간 자정을 사용자 현지 시각으로 표시
+    try {
+      const now = new Date();
+      for (let h = 1; h <= 26; h++){
+        const t = new Date(now.getTime() + h * 3600 * 1000);
+        const hh = Number(t.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', hour12: false }));
+        if (hh === 0 || hh === 24){
+          t.setMinutes(0, 0, 0);
+          return t.toLocaleString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short', hour: 'numeric', minute: '2-digit' });
+        }
+      }
+    } catch(e){}
+    return '내일';
+  }
+  function parseRetryDelayMs(errData){
+    try {
+      const d = (errData.error.details || []).find(x => /RetryInfo/.test(x['@type'] || ''));
+      if (d && d.retryDelay){ const n = parseFloat(String(d.retryDelay)); if (!isNaN(n)) return Math.min(90000, Math.max(2000, n * 1000)); }
+    } catch(e){}
+    return 0;
+  }
+  function isDailyQuota(errData, msg){
+    try {
+      const q = (errData.error.details || []).find(x => /QuotaFailure/.test(x['@type'] || ''));
+      if (q && (q.violations || []).some(v => /PerDay|per_day|daily/i.test((v.quotaId || '') + ' ' + (v.quotaMetric || '')))) return true;
+    } catch(e){}
+    return /per day|perday|daily/i.test(msg || '');
+  }
   let ocrLastJob = null;           // [다시 판독] 버튼이 재실행할 작업
   let geminiNoJsonMime = false;    // 모델이 responseMimeType 을 지원하지 않으면 자동으로 빼고 요청
   function ocrCancelBtn(show){
@@ -3973,7 +4036,10 @@
     }
   }
 
-  async function callClaude(images, promptText){
+  async function callClaude(images, promptText, opts){
+    opts = opts || {};
+    const essential = opts.essential !== false;   // false = 칸/숫자 재대조 같은 보조 판독 (실패해도 1차 결과로 진행)
+    if (!essential && geminiLimited) throw Object.assign(new Error('한도/혼잡으로 보조 판독을 건너뜁니다.'), { isSkip: true });
     const apiKey = getGeminiKey();
     if (!apiKey){
       throw new Error('API 키가 설정되어 있지 않습니다. 코드 상단의 HARDCODED_API_KEY를 확인해주세요.');
@@ -3992,21 +4058,32 @@
     const baseText = loadingBox ? loadingBox.textContent : '';
     const t0 = Date.now();
     const dead = new Set();          // 이 키로는 쓸 수 없는 모델(지원 종료 등)
-    let lastErr = null, round = 0, tries = 0;
+    let lastErr = null, round = 0, tries = 0, suggestedWait = 0;
 
     try {
       while (true){
         if (ocrCancelRequested) throw ocrCancelError();
-        const alive = GEMINI_MODEL_CANDIDATES.filter(m => !dead.has(m));
+        const daily = dailyExhaustedSet();
+        const usable = GEMINI_MODEL_CANDIDATES.filter(m => !daily.has(m));
+        if (!usable.length){
+          const e = new Error('오늘 사용할 수 있는 Gemini 무료 판독량을 모두 사용했습니다. ' + quotaResetLocalText() + ' 이후 자동으로 초기화됩니다. (그 전에 판독하려면 다른 API 키나 유료 결제 키로 교체해 주세요)');
+          e.isQuota = true; throw e;
+        }
+        const alive = usable.filter(m => !dead.has(m));
         if (!alive.length){
           // 모든 모델이 "사용 불가" 판정 → 목록을 초기화해 처음부터 다시 시도 (일시적인 400/404 대비)
           dead.clear();
-          alive.push(...GEMINI_MODEL_CANDIDATES);
+          alive.push(...usable);
         }
         for (const model of alive){
           if (ocrCancelRequested) throw ocrCancelError();
           tries++;
           const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(apiKey);
+          if (dailyExhaustedSet().has(model)) continue;
+          // 분당 한도에 걸린 적이 있으면 요청 간격을 벌립니다
+          const gap = geminiMinGapMs - (Date.now() - geminiLastCallAt);
+          if (gap > 0) await waitWithCountdown(gap, ()=>{});
+          geminiLastCallAt = Date.now();
           let response;
           try {
             response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: makeBody() });
@@ -4016,12 +4093,19 @@
           }
 
           if (!response.ok){
-            let msg = 'HTTP ' + response.status;
+            let msg = 'HTTP ' + response.status, errData = null;
             try {
-              const errData = await response.json();
+              errData = await response.json();
               if (errData && errData.error && errData.error.message) msg = errData.error.message;
             } catch(e){}
             lastErr = new Error(msg);
+            if (response.status === 429){
+              if (isDailyQuota(errData, msg)){ markDailyExhausted(model); continue; }   // 이 모델은 오늘 끝 → 다른 모델로
+              const rd = parseRetryDelayMs(errData);
+              geminiMinGapMs = Math.max(geminiMinGapMs, 4500);
+              if (rd) suggestedWait = Math.max(suggestedWait, rd);
+              continue;
+            }
             // API 키 자체가 막힌 경우는 몇 번을 다시 해도 성공할 수 없으므로 바로 안내합니다.
             if (isGeminiKeyError(response.status, msg) || (response.status === 400 && /api key not valid|api_key_invalid/i.test(msg))){
               lastErr.isKeyError = true;
@@ -4053,10 +4137,20 @@
           return textOut;
         }
 
-        // 한 바퀴(모든 모델) 실패 → 점점 길게 기다렸다가 다시 시도 (판독될 때까지 반복)
+        // 한 바퀴(모든 모델) 실패 → 점점 길게 기다렸다가 다시 시도
         round++;
+        if (!essential && round >= GEMINI_SUPPORT_MAX_ROUNDS){
+          // 보조 판독은 오래 붙잡지 않고 건너뜁니다 (1차 판독 결과는 그대로 사용). 이후 보조 판독도 이번 작업에서는 생략.
+          geminiLimited = true;
+          const e = new Error('보조 판독 생략: ' + (lastErr ? lastErr.message : '')); e.isSkip = true; throw e;
+        }
+        if (essential && Date.now() - t0 > GEMINI_ESSENTIAL_MAX_MS){
+          const e = new Error('Gemini 서버가 ' + Math.round((Date.now()-t0)/60000) + '분 동안 응답하지 않아 판독을 멈췄습니다. 잠시 후 [이어서 판독]을 눌러주세요. (마지막 응답: ' + (lastErr ? lastErr.message : '-') + ')');
+          e.isRetryExhausted = true; throw e;
+        }
         ocrCancelBtn(true);
-        const waitMs = Math.min(30000, 3000 * Math.pow(2, round - 1)) + Math.floor(Math.random() * 1000);
+        let waitMs = Math.min(30000, 3000 * Math.pow(2, round - 1)) + Math.floor(Math.random() * 1000);
+        if (suggestedWait){ waitMs = Math.max(waitMs, suggestedWait); suggestedWait = 0; }
         const reason = lastErr ? lastErr.message : '';
         const short = /high demand|overload|503|unavailable/i.test(reason) ? 'Gemini 서버가 혼잡합니다'
           : /429|quota|rate limit|resource.?exhausted/i.test(reason) ? '요청이 많아 잠시 대기합니다'
@@ -4420,10 +4514,11 @@ ${CONFUSABLE_NOTE}
 반드시 아래 JSON 형식만 출력하십시오(설명 문장 금지, 코드블록 금지):
 ${rowResultSchema()}`;
     try {
-      const text = await callClaude([imageFromDataUrl(croppedDataUrl), imageFromDataUrl(zoomUrl)], prompt);
+      const text = await callClaude([imageFromDataUrl(croppedDataUrl), imageFromDataUrl(zoomUrl)], prompt, { essential: false });
       const parsed = parseJsonLoose(text);
       return mergeRecheck(row, parsed);
     } catch(e){
+      if (e.isCancel || e.isQuota || e.isKeyError) throw e;
       return row;
     }
   }
@@ -4431,6 +4526,7 @@ ${rowResultSchema()}`;
   async function runOcr(dataUrl){
     ocrLastJob = ()=> runOcr(dataUrl);
     ocrCancelRequested = false;
+    geminiLimited = false;
     state.pagesData = [];
     document.getElementById('loading-box').style.display = '';
     document.getElementById('loading-box').textContent = 'Gemini가 표를 읽는 중입니다...';
@@ -4454,7 +4550,7 @@ ${rowResultSchema()}`;
         state.rows = ref.rows;
       } else {
         lb.textContent = '손글씨 숫자를 셀 단위로 확대해서 한 번 더 대조하는 중입니다...';
-        for (let i=0;i<state.rows.length;i++){
+        for (let i=0;i<state.rows.length && !geminiLimited;i++){
           state.rows[i] = await recheckRowWithZoom(state.rows[i]);
         }
       }
@@ -4462,6 +4558,10 @@ ${rowResultSchema()}`;
       if (state.gridFailed){
         const st = document.getElementById('summary-text');
         if (st) st.textContent = (st.textContent ? st.textContent + ' ' : '') + '⚠ 사진에서 표 칸 위치를 찾지 못해 기본 판독만 했습니다. 숫자가 맞는 칸에 들어갔는지 꼭 확인해주세요. (표 전체가 보이게, 정면에서 다시 찍으면 칸 단위 정밀 판독이 적용됩니다)';
+      }
+      if (geminiLimited){
+        const st = document.getElementById('summary-text');
+        if (st) st.textContent = (st.textContent ? st.textContent + ' ' : '') + '⚠ Gemini 혼잡/사용량 한도로 일부 칸 재대조를 건너뛰었습니다. 숫자를 한 번 더 확인해주세요.';
       }
     } catch(err){
       showOcrError(err);
@@ -4472,19 +4572,35 @@ ${rowResultSchema()}`;
     }
   }
 
-  async function runOcrMultiPage(pageImages){
-    ocrLastJob = ()=> runOcrMultiPage(pageImages);
+  let ocrMultiDone = 0;   // 다중 페이지 판독에서 완료된 페이지 수 (중단 후 [이어서 판독]에 사용)
+  async function runOcrMultiPage(pageImages, resumeFrom){
+    const startAt = resumeFrom || 0;
+    ocrLastJob = ()=> runOcrMultiPage(pageImages, ocrMultiDone);
     ocrCancelRequested = false;
+    geminiLimited = false;
     document.getElementById('loading-box').style.display = '';
     document.getElementById('error-box').style.display = 'none';
-    document.getElementById('results-table-wrap').innerHTML = '';
-    document.getElementById('doc-info').innerHTML = '';
-    document.getElementById('summary-text').textContent = '';
-    state.rows = [];
-    state.pagesData = [];
-    state.gridFailed = false;
+    if (!startAt){
+      document.getElementById('results-table-wrap').innerHTML = '';
+      document.getElementById('doc-info').innerHTML = '';
+      document.getElementById('summary-text').textContent = '';
+      state.rows = [];
+      state.pagesData = [];
+      state.gridFailed = false;
+      ocrMultiDone = 0;
+    } else {
+      state.pagesData.length = startAt;   // 중단된 페이지의 반쯤 진행된 정보는 버리고 그 장부터 다시
+    }
+    const finishView = ()=>{
+      state.overallConfidence = state.rows.length
+        ? state.rows.reduce((s,r)=> s + (r.confidence!=null ? r.confidence : 0), 0) / state.rows.length
+        : null;
+      state.needsReview = state.rows.some(r=> r.confidence===null || r.confidence===undefined || r.confidence < 0.75);
+      if (state.pagesData[0]) document.getElementById('ocr-crop-preview').src = state.pagesData[0].croppedDataUrl;
+      renderResults();
+    };
     try {
-      for (let p=0; p<pageImages.length; p++){
+      for (let p=startAt; p<pageImages.length; p++){
         document.getElementById('loading-box').textContent =
           '(' + (p+1) + '/' + pageImages.length + ') 페이지 표 영역을 인식하고 Gemini로 판독 중...';
         const warped = autoCropPage(pageImages[p]);
@@ -4505,11 +4621,12 @@ ${rowResultSchema()}`;
           rows = ref.rows.map(r=>({ ...r, pageIndex, docInfo: pageDoc }));
         } else {
           lb.textContent = pre + '손글씨 숫자를 셀 단위로 재대조하는 중...';
-          for (let i=0;i<rows.length;i++){
+          for (let i=0;i<rows.length && !geminiLimited;i++){
             rows[i] = await recheckRowWithZoom(rows[i], warped, croppedDataUrl);
           }
         }
         state.rows.push(...rows);
+        ocrMultiDone = p + 1;
       }
       state.overallConfidence = state.rows.length
         ? state.rows.reduce((s,r)=> s + (r.confidence!=null ? r.confidence : 0), 0) / state.rows.length
@@ -4524,7 +4641,15 @@ ${rowResultSchema()}`;
         const st = document.getElementById('summary-text');
         if (st) st.textContent = (st.textContent ? st.textContent + ' ' : '') + '⚠ 사진에서 표 칸 위치를 찾지 못해 기본 판독만 했습니다. 숫자가 맞는 칸에 들어갔는지 꼭 확인해주세요. (표 전체가 보이게, 정면에서 다시 찍으면 칸 단위 정밀 판독이 적용됩니다)';
       }
+      if (geminiLimited){
+        const st = document.getElementById('summary-text');
+        if (st) st.textContent = (st.textContent ? st.textContent + ' ' : '') + '⚠ Gemini 혼잡/사용량 한도로 일부 칸 재대조를 건너뛰었습니다. 숫자를 한 번 더 확인해주세요.';
+      }
     } catch(err){
+      if (state.rows.length){
+        finishView();
+        err.partial = { done: ocrMultiDone, total: pageImages.length };
+      }
       showOcrError(err);
     } finally {
       document.getElementById('loading-box').style.display = 'none';
