@@ -1114,6 +1114,23 @@
         .io-sort-th:hover{ color:#3b5bdb; }
         .io-sort-th .io-sort-ind{ display:inline-block; width:12px; margin-left:3px; font-size:0.68rem; color:#c0c8d6; }
         .io-sort-th.io-sorted .io-sort-ind{ color:#3b5bdb; }
+        .iod-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
+        .iod-head-text{ flex:1; min-width:0; }
+        .iod-head-text .dp-card-sub{ max-width:760px; line-height:1.55; margin-top:4px; }
+        .iod-head-actions{ display:flex; gap:8px; flex-shrink:0; }
+        .iod-btn{ height:38px; padding:0 18px !important; display:inline-flex; align-items:center; justify-content:center; white-space:nowrap; font-size:0.85rem; }
+        .iod-toolbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-top:16px; padding-top:14px; border-top:1px solid #eef1f6; }
+        .iod-stats{ display:flex; gap:8px; flex-wrap:wrap; }
+        .iod-stat{ display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 12px; border-radius:8px; background:#f5f7fb; border:1px solid #e8edf4; font-size:0.8rem; font-weight:700; color:#475569; white-space:nowrap; }
+        .iod-stat b{ color:#0f172a; font-size:0.88rem; }
+        .iod-stat.iod-stat-done{ background:#effaf3; border-color:#cdeeda; color:#15803d; }
+        .iod-stat.iod-stat-done b{ color:#15803d; }
+        .iod-filters{ display:flex; gap:8px; align-items:center; }
+        .iod-filters .io-group-search{ width:260px; min-width:0; }
+        @media (max-width: 900px){
+          .iod-head{ flex-direction:column; } .iod-head-actions{ width:100%; } .iod-head-actions .iod-btn{ flex:1; }
+          .iod-filters{ width:100%; } .iod-filters .io-group-search{ flex:1; width:auto; }
+        }
         .io-only-unchk{ display:inline-flex; align-items:center; gap:5px; font-size:0.8rem; font-weight:700; color:#475569; height:38px; padding:0 10px; border:1px solid #d5dde8; border-radius:9px; background:#fff; cursor:pointer; white-space:nowrap; }
         .iog-table td.iog-sel{ background:#dbeafe !important; box-shadow:inset 0 0 0 1px #3b82f6; }
         .iog-table td.iog-sel input{ background:transparent; }
@@ -1980,16 +1997,21 @@
 
             <div id="io-panel-delivery">
                 <div class="dp-card">
-                    <div class="dp-card-title-row">
-                        <div>
+                    <div class="iod-head">
+                        <div class="iod-head-text">
                             <div class="dp-card-title">배송 부문 P-BOX 입출고</div>
-                            <div class="dp-card-sub">기사님별 합계 · 행을 누르면 기록일지 양식으로 거래처별 수량을 수정합니다 · 구글 시트 "PBOX_배송" 탭에 저장되며 검증완료 기록이 대시보드 실적에 반영됩니다 <span id="io-group-count" style="margin-left:6px; font-weight:700; color:#334155;"></span></div>
+                            <div class="dp-card-sub">기사님별 합계 · 행을 누르면 기록일지 양식으로 거래처별 수량을 수정합니다 · 구글 시트 "PBOX_배송" 탭에 저장되며 검증완료 기록이 대시보드 실적에 반영됩니다</div>
                         </div>
-                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <div class="iod-head-actions">
+                            <button class="dp-btn-outline iod-btn" id="io-delivery-excel-btn">Excel 다운로드</button>
+                            <button class="dp-btn-primary iod-btn" id="io-delivery-add-btn">+ 수기 등록</button>
+                        </div>
+                    </div>
+                    <div class="iod-toolbar">
+                        <div class="iod-stats" id="io-group-count"></div>
+                        <div class="iod-filters">
                             <input type="text" id="io-group-search" class="io-group-search" placeholder="센터·일자·기사·차량·거래처 검색">
                             <label class="io-only-unchk" title="수정 이력이 없는(아직 확인하지 않은) 기사님만 보기"><input type="checkbox" id="io-only-unchecked"> 미확인만</label>
-                            <button class="dp-btn-outline" id="io-delivery-excel-btn">Excel 다운로드</button>
-                            <button class="dp-btn-primary" id="io-delivery-add-btn" style="padding:0 18px; height:38px;">+ 수기 등록</button>
                         </div>
                     </div>
                     <div class="dp-table-wrap">
@@ -5756,7 +5778,12 @@ ${rowResultSchema()}`;
     });
     ioPaintSortHead('io-delivery-head', iogSort);
     const cnt = document.getElementById('io-group-count');
-    if (cnt) cnt.innerHTML = '기사 ' + list.length + '건 · 거래처 기록 ' + list.reduce((a, g)=> a + g.items.length, 0) + '건 · <span style="color:#15803d;">수정 완료 ' + doneCnt + '</span> / ' + (q ? iogGroups.filter(g=> [g.center, g.date, g.driver, g.car].concat(g.items.map(i=> i.custName || '')).some(x=> String(x).toLowerCase().includes(q))).length : iogGroups.length) + '명';
+    if (cnt){
+      const totalDrivers = q ? iogGroups.filter(g=> [g.center, g.date, g.driver, g.car].concat(g.items.map(i=> i.custName || '')).some(x=> String(x).toLowerCase().includes(q))).length : iogGroups.length;
+      cnt.innerHTML = '<span class="iod-stat">기사 <b>' + list.length + '</b>명</span>' +
+        '<span class="iod-stat">거래처 기록 <b>' + list.reduce((a, g)=> a + g.items.length, 0) + '</b>건</span>' +
+        '<span class="iod-stat iod-stat-done">✔ 수정 완료 <b>' + doneCnt + '</b> / ' + totalDrivers + '명</span>';
+    }
     list = list.slice(0, 200);
     if (!list.length){
       tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:#94a3b8; padding:16px;">' + (q ? '검색 결과가 없습니다.' : iogOnlyUnchecked ? '수정 이력이 없는(미확인) 기사님이 없습니다. 모두 확인했습니다 👍' : '선택한 기간·센터에 저장된 기록이 없습니다. 위에서 조회 기간을 바꿔 보세요.') + '</td></tr>';
