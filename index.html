@@ -4019,24 +4019,61 @@
 
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
-  // ---- Gemini API 키: 화면에서 새로 입력한 키(이 기기에 저장)가 있으면 그것을 우선 사용합니다 ----
-  //  · 키가 만료/정지(예: "The bound service account is deleted or disabled")되면 코드를 고치지 않고
-  //    판독 오류 화면의 [🔑 새 API 키 입력] 버튼 또는 상단 CLOUD ONLINE 배지(관리자)로 새 키를 넣을 수 있습니다.
+  // ---- Gemini API 키 우선순위 ----
+  //  ① 이 기기에서 직접 입력한 키(임시)  ② 구글 시트 스크립트에 저장된 "공용 키"(관리자가 앱에서 입력)  ③ 파일에 들어 있는 기본 키
+  //  · 키가 정지·만료되면(예: "The bound service account is deleted or disabled") 관리자가 한 번만 새 키를 넣으면
+  //    모든 센터 PC가 다음 판독부터 자동으로 새 키를 사용합니다. HTML 파일을 다시 배포할 필요가 없습니다.
   const GEMINI_KEY_OVERRIDE = 'pbox_gemini_api_key_override';
+  let serverGeminiKey = '';
+  let serverGeminiKeyLoadedAt = 0;
+  async function loadServerGeminiKey(force){
+    if (!force && serverGeminiKeyLoadedAt && Date.now() - serverGeminiKeyLoadedAt < 10 * 60 * 1000) return serverGeminiKey;
+    try {
+      const r = await callScriptRaw({ action: 'getGeminiKey' });
+      if (r && r.result === 'success'){ serverGeminiKey = String(r.key || '').trim(); }
+    } catch(e){ /* 시트 연결이 안 되면 기존 키로 진행 */ }
+    serverGeminiKeyLoadedAt = Date.now();
+    return serverGeminiKey;
+  }
   function getGeminiKey(){
     let k = '';
     try { k = (localStorage.getItem(GEMINI_KEY_OVERRIDE) || '').trim(); } catch(e){}
-    return k || HARDCODED_API_KEY || '';
+    return k || serverGeminiKey || HARDCODED_API_KEY || '';
   }
-  function promptGeminiKey(){
-    const cur = getGeminiKey();
-    const v = prompt('새 Gemini API 키를 입력하세요.\n(Google AI Studio › Get API key 에서 발급 · 이 기기에만 저장됩니다)\n\n현재 키: ' + (cur ? cur.slice(0,6) + '…' + cur.slice(-4) : '없음') + '\n비워두고 확인하면 파일에 들어 있는 기본 키로 되돌립니다.', '');
-    if (v === null) return false;
+  // 새 키가 실제로 동작하는지 저장 전에 확인
+  async function testGeminiKey(key){
     try {
-      if (v.trim()) localStorage.setItem(GEMINI_KEY_OVERRIDE, v.trim());
-      else localStorage.removeItem(GEMINI_KEY_OVERRIDE);
-    } catch(e){ alert('이 브라우저에 키를 저장하지 못했습니다.'); return false; }
-    alert(v.trim() ? '새 API 키를 저장했습니다. 다시 판독해 주세요.' : '기본 키로 되돌렸습니다.');
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=' + encodeURIComponent(key));
+      if (r.ok) return { ok: true };
+      let m = 'HTTP ' + r.status; try { const j = await r.json(); if (j && j.error && j.error.message) m = j.error.message; } catch(e){}
+      return { ok: false, message: m };
+    } catch(e){ return { ok: false, message: '네트워크 오류: ' + (e.message || e) }; }
+  }
+  async function promptGeminiKey(){
+    const cur = getGeminiKey();
+    const admin = hasFullAccess();
+    const v = prompt('새 Gemini API 키를 입력하세요.\n(Google AI Studio › API 키 › "API 키 만들기"로 발급, 보통 AIza 로 시작)\n\n' +
+      (admin ? '관리자 계정이라 저장하면 모든 센터에 공용으로 적용됩니다.' : '이 기기에만 저장됩니다. 모든 센터에 적용하려면 관리자에게 요청하세요.') +
+      '\n현재 키: ' + (cur ? cur.slice(0,6) + '…' + cur.slice(-4) : '없음'), '');
+    if (v === null || !v.trim()) return false;
+    const key = v.trim();
+    showLoader && showLoader('🔑 새 API 키 확인 중...');
+    const t = await testGeminiKey(key);
+    hideLoader && hideLoader();
+    if (!t.ok){ alert('이 키는 사용할 수 없습니다.\n' + t.message + '\n\nGoogle AI Studio에서 새로 만든 키를 다시 복사해 주세요.'); return false; }
+    if (admin){
+      const r = await callScriptRaw({ action: 'setGeminiKey', key, userId: currentUser.id, password: currentUser.password, center: currentUser.center }).catch(e=>({ result:'error', message: e.message }));
+      if (r && r.result === 'success'){
+        serverGeminiKey = key; serverGeminiKeyLoadedAt = Date.now();
+        try { localStorage.removeItem(GEMINI_KEY_OVERRIDE); } catch(e){}
+        alert('✅ 새 API 키를 공용 키로 저장했습니다.\n모든 센터 PC가 다음 판독부터 자동으로 이 키를 사용합니다. 다시 판독해 주세요.');
+        return true;
+      }
+      const old = r && /알 수 없는 요청/.test(r.message || '');
+      alert((old ? '구글 시트 스크립트(Code.gs)가 아직 이전 버전이라 공용 키로 저장하지 못했습니다.\n새 Code.gs를 붙여넣고 "새 버전"으로 배포하면 공용 저장이 됩니다.' : '공용 키 저장 실패: ' + ((r && r.message) || '')) + '\n\n우선 이 기기에만 저장합니다.');
+    }
+    try { localStorage.setItem(GEMINI_KEY_OVERRIDE, key); } catch(e){ alert('이 브라우저에 키를 저장하지 못했습니다.'); return false; }
+    alert('새 API 키를 이 기기에 저장했습니다. 다시 판독해 주세요.');
     return true;
   }
   window.setGeminiKey = promptGeminiKey;
@@ -4050,10 +4087,11 @@
     const msg = (err && err.message) ? err.message : String(err);
     if (err && err.isKeyError){
       box.innerHTML = '<b>Gemini API 키를 사용할 수 없습니다.</b><br>' + escapeHtml(msg) +
-        '<br><span style="opacity:.85;">키가 만료·정지되었거나 연결된 서비스 계정이 삭제된 상태입니다. Google AI Studio에서 새 키를 발급받아 입력해 주세요.</span>' +
+        '<br><span style="opacity:.85;">Google 쪽에서 이 키가 정지·만료되었거나 연결된 서비스 계정이 삭제된 상태입니다. 앱 코드로는 되살릴 수 없어 <b>새 키</b>가 필요합니다.<br>' +
+        (hasFullAccess() ? 'Google AI Studio에서 새 키를 만든 뒤 아래 버튼으로 입력하면 <b>모든 센터에 한 번에 적용</b>됩니다.' : '관리자(물류기획팀)에게 새 키 등록을 요청해 주세요. 관리자가 등록하면 이 PC도 자동으로 새 키를 사용합니다. 급하면 아래 버튼으로 이 PC에만 임시로 넣을 수 있습니다.') + '</span>' +
         '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-key-fix-btn">🔑 새 API 키 입력</button></div>';
       const b = document.getElementById('ocr-key-fix-btn');
-      if (b) b.onclick = ()=>{ if (promptGeminiKey()) box.style.display = 'none'; };
+      if (b) b.onclick = async ()=>{ if (await promptGeminiKey()){ box.style.display = 'none'; if (ocrLastJob) ocrLastJob(); } };
     } else if (err && (err.isCancel || err.isQuota || err.isRetryExhausted) && err.partial){
       const p = err.partial;
       box.innerHTML = '<b>' + p.total + '장 중 ' + p.done + '장까지 판독을 마쳤고, 결과는 아래 표에 들어 있습니다.</b><br>' +
@@ -4066,7 +4104,7 @@
       box.innerHTML = '<b>오늘 Gemini 판독 사용량을 모두 썼습니다.</b><br>' + escapeHtml(msg) +
         '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-key-fix-btn">🔑 다른 API 키 입력</button></div>';
       const b = document.getElementById('ocr-key-fix-btn');
-      if (b) b.onclick = ()=>{ if (promptGeminiKey()){ try { localStorage.removeItem(GEMINI_DAILY_KEY); } catch(e){} box.style.display = 'none'; } };
+      if (b) b.onclick = async ()=>{ if (await promptGeminiKey()){ try { localStorage.removeItem(GEMINI_DAILY_KEY); } catch(e){} box.style.display = 'none'; if (ocrLastJob) ocrLastJob(); } };
     } else if (err && err.isCancel){
       box.innerHTML = '판독을 중지했습니다. 다시 판독하려면 아래 버튼을 눌러주세요.' +
         '<div style="margin-top:10px;"><button type="button" class="btn-mini" id="ocr-retry-btn">🔄 다시 판독</button></div>';
@@ -4163,7 +4201,9 @@
     opts = opts || {};
     const essential = opts.essential !== false;   // false = 칸/숫자 재대조 같은 보조 판독 (실패해도 1차 결과로 진행)
     if (!essential && geminiLimited) throw Object.assign(new Error('한도/혼잡으로 보조 판독을 건너뜁니다.'), { isSkip: true });
-    const apiKey = getGeminiKey();
+    await loadServerGeminiKey(false);
+    let apiKey = getGeminiKey();
+    let keyRefreshed = false;
     if (!apiKey){
       throw new Error('API 키가 설정되어 있지 않습니다. 코드 상단의 HARDCODED_API_KEY를 확인해주세요.');
     }
@@ -4231,6 +4271,13 @@
             }
             // API 키 자체가 막힌 경우는 몇 번을 다시 해도 성공할 수 없으므로 바로 안내합니다.
             if (isGeminiKeyError(response.status, msg) || (response.status === 400 && /api key not valid|api_key_invalid/i.test(msg))){
+              // 관리자가 이미 새 공용 키를 등록했을 수 있으니 한 번 다시 받아와서, 키가 바뀌었으면 바로 재시도
+              if (!keyRefreshed){
+                keyRefreshed = true;
+                await loadServerGeminiKey(true);
+                const nk = getGeminiKey();
+                if (nk && nk !== apiKey){ apiKey = nk; tries--; continue; }
+              }
               lastErr.isKeyError = true;
               throw lastErr;
             }
